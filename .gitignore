@@ -1,1 +1,27 @@
 .envDjango_app/hapi-fhir-jpaserver-starter/
+# Ignore virtual environments
+venv/
+.venv_anna/
+
+# Ignore data and build directories
+data/
+target/
+
+# Ignore specific project directories
+hapi-fhir-jpaserver-starter/
+
+# Ignore all log files
+**/*.log
+
+# Ignore temporary files and directories
+tmp/
+*.tmp
+
+# Ignore specific files if needed
+specific_file_to_ignore.txt
+
+# Ignore all markdown files in docs directory
+docs/**/*.md
+
+# Commented out patterns are not applied
+# node_modules/
