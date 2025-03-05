@@ -24,4 +24,5 @@ specific_file_to_ignore.txt
 docs/**/*.md
 
 # Commented out patterns are not applied
-# node_modules/
+# node_modules/Django_app/.venv_anna/
+Django_app/app.log
