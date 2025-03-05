@@ -1,0 +1,27 @@
+spring:
+  datasource:
+    url: 'jdbc:h2:file:./target/database/h2'
+    username: sa
+    password: null
+    driverClassName: org.h2.Driver
+  jpa:
+    properties:
+      hibernate.dialect: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: true  # This will help us see what's happening with the database
+  h2:
+    console:
+      enabled: true  # Enables H2 console for debugging
+
+hapi:
+  fhir:
+    server_address: http://localhost:8080/fhir
+    default_encoding: JSON
+    fhir_version: R4
+    enable_repository_validating_interceptor: false
+    persistence_unit_name: HAPI_PU
+    schema_update_mode: update  # Explicitly set schema update mode
+    validation:
+      enabled: false  # Disable validation during initial setup

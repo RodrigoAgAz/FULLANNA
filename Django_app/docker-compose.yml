@@ -1,0 +1,37 @@
+version: '3.8'
+services:
+  hapi-fhir:
+    image: hapiproject/hapi:latest
+    ports:
+      - "8080:8080"  # HAPI FHIR API port only; removed port 8000 mapping
+    volumes:
+      - ./data/hapi:/data/hapi
+    environment:
+      - spring.datasource.url=jdbc:h2:/data/hapi/database;AUTO_SERVER=TRUE
+      - spring.datasource.username=admin
+      - spring.datasource.password=admin
+      - spring.datasource.driverClassName=org.h2.Driver
+      - hapi.fhir.allow_external_references=true
+      - hapi.fhir.expunge_enabled=true
+      - hapi.fhir.allow_multiple_delete=true
+      - REDIS_HOST=redis     # Connect to the 'redis' service
+      - REDIS_PORT=6379      # Default Redis port
+      - REDIS_DB=0           # Default Redis DB
+      - DEBUG=True          # Set to False in production
+      - SECRET_KEY=your-secret-key # Replace with a strong secret key!
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"  # Expose port 6379 (optional, for external access/debugging)
+    volumes:
+      - redis-data:/data  # Persist Redis data
+    restart: unless-stopped
+
+volumes:
+  hapi-data:
+  redis-data:
