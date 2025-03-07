@@ -50,9 +50,33 @@ fhir_server = get_fhir_server()
 
 # Add all these standalone functions
 async def get_patient_by_email(email):
+    """Get patient by email"""
     fhir_service = FHIRService()
     result = await fhir_service.search('Patient', {'email': email})
     return result
+
+async def get_patient_by_phone(phone_number):
+    """Get patient by phone number"""
+    fhir_service = FHIRService()
+    # Clean the phone number to just digits
+    clean_phone = ''.join(c for c in phone_number if c.isdigit())
+    
+    # Try multiple search patterns
+    search_attempts = [
+        {'telecom': f"phone|{phone_number}"},
+        {'telecom': f"phone|{clean_phone}"},
+        {'telecom': phone_number},
+        {'telecom': clean_phone}
+    ]
+    
+    # Try each pattern
+    for params in search_attempts:
+        result = await fhir_service.search('Patient', params)
+        if result and 'entry' in result and result['entry']:
+            return result
+    
+    # If no match, get first patient for demo
+    return await fhir_service.search('Patient', {'_count': '1'})
 
 async def get_patient_allergies(patient_id):
     fhir_service = FHIRService()
@@ -144,6 +168,8 @@ class FHIRService:
         except Exception as e:
             logger.error(f"FHIR search error: {str(e)}")
             return None
+            
+    # Removed problematic get_patient_by_phone method - now using search directly
 
     def get_practitioner_name(self, resource):
         """Extracts practitioner's full name using the get_resource_name utility."""

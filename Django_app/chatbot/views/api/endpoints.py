@@ -1,31 +1,38 @@
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
 import json
 import logging
 import inspect
 from asgiref.sync import sync_to_async
+from inspect import iscoroutinefunction
 
 from chatbot.views.services.session import get_session
 from chatbot.views.handlers.chat_handler import ChatHandler
 
 logger = logging.getLogger('chatbot')
 
-@csrf_exempt
+
 async def chat(request):
     """Async endpoint that processes chat messages using ChatHandler"""
     print("DEBUG-EP-1: Starting chat endpoint function")
+    print(f"DEBUG-EP-REQUEST: URL={request.path}, METHOD={request.method}")
+    
+    # Debug logging to confirm we're hitting this function
+    if request.path == "/chatbot/chat/":
+        print("DEBUG-EP-CONTINUING: Passing request to chat handler")
+    
     try:
         logger.debug("chat function called")
         print("DEBUG-EP-2: About to read request body")
-        body = await request.read()
+        body = request.body  # This is bytes
         print("DEBUG-EP-3: Parsed request body")
-        data = json.loads(body)
+        data = json.loads(body.decode('utf-8'))  # Decode to string and parse JSON
         user_id = data.get('user_id')
         user_message = data.get('message', '')
         print(f"DEBUG-EP-4: Got user_id={user_id}, message={user_message}")
 
         print("DEBUG-EP-5: Getting session data")
         session_data = await get_session(user_id)
+        print(f"Is ChatHandler.__init__ a coroutine function? {iscoroutinefunction(ChatHandler.__init__)}")
         print("DEBUG-EP-6: Creating ChatHandler")
         handler = ChatHandler(session_data, user_message, user_id)
         print("DEBUG-EP-7: About to initialize handler")

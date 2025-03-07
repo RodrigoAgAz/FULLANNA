@@ -71,49 +71,73 @@ class SessionManager:
     async def get_session(self, session_id: str) -> Dict[str, Any]:
         """Get existing session or create new one"""
         try:
+            # Check in-memory sessions first
+            if session_id in SessionManager._memory_sessions:
+                logger.info(f"Using in-memory session for {session_id}")
+                return SessionManager._memory_sessions[session_id]
+        
             async with self.get_redis() as redis:
                 if redis is None:
                     logger.warning("Redis connection not available, using in-memory fallback")
-                    return self._create_default_session(session_id)
+                    # Check again for memory sessions
+                    if session_id in SessionManager._memory_sessions:
+                        return SessionManager._memory_sessions[session_id]
+                    # No session found, create default
+                    new_session = await self._create_or_verify_session(session_id)
+                    SessionManager._memory_sessions[session_id] = new_session
+                    return new_session
                 
                 session_key = self._get_session_key(session_id)
                 try:
-                    print("hello inside get_session function, before redis.get")
                     session_data = await redis.get(session_key)
-                    print("hello inside get_session function, after redis.get")
                     if session_data:
-                        return json.loads(session_data)
+                        parsed_session = json.loads(session_data)
+                        # Store in memory for faster access
+                        SessionManager._memory_sessions[session_id] = parsed_session
+                        return parsed_session
                 except Exception as e:
                     logger.error(f"Error reading session: {e}")
+                    # Check memory fallback
+                    if session_id in SessionManager._memory_sessions:
+                        return SessionManager._memory_sessions[session_id]
                     raise
                 
                 # Create new session
-                new_session = await self._create_or_verify_session(session_id)  # Fixed with await
+                new_session = await self._create_or_verify_session(session_id)
                 try:
                     await redis.set(
                         session_key,
                         json.dumps(new_session),
                         ex=int(self.session_timeout.total_seconds())
                     )
+                    # Store in memory too
+                    SessionManager._memory_sessions[session_id] = new_session
                 except Exception as e:
                     logger.error(f"Error saving new session: {e}")
-                    raise
+                    # Still store in memory
+                    SessionManager._memory_sessions[session_id] = new_session
                 return new_session
                 
         except Exception as e:
             logger.error(f"Session operation failed: {e}")
             raise
 
+    # In-memory session fallback storage
+    _memory_sessions = {}
+    
     async def update_session(self, session_id: str, session_data: Dict[str, Any]) -> None:
         """Update existing session"""
         try:
+            # Update last interaction time
+            session_data['last_interaction'] = datetime.now(timezone.utc).isoformat()
+            
             async with self.get_redis() as redis:
                 if redis is None:
-                    logger.warning("Redis connection not available, session update skipped")
+                    # Redis not available, use in-memory storage
+                    logger.warning("Redis connection not available, using in-memory storage")
+                    # Store in memory
+                    SessionManager._memory_sessions[session_id] = session_data
                     return
-                
-                # Update last interaction time
-                session_data['last_interaction'] = datetime.now(timezone.utc).isoformat()
                 
                 # Store updated session using consistent key format
                 session_key = self._get_session_key(session_id)
@@ -124,7 +148,8 @@ class SessionManager:
                 )
         except Exception as e:
             logger.error(f"Error updating session: {str(e)}")
-            # Log error but don't raise to maintain compatibility with existing code
+            # Fall back to in-memory storage
+            SessionManager._memory_sessions[session_id] = session_data
 
     async def reset_session(self, session_id: str, preserve_patient: bool = True) -> Dict[str, Any]:
         """Reset session while optionally preserving patient data"""

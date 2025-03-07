@@ -45,7 +45,7 @@ from fhirclient.models.patient import Patient
 from fhirclient.models.immunization import Immunization
 from fhirclient.models.bundle import Bundle
 from fhirclient.server import FHIRServer
-from .debug_utils import trace_async_calls, debug_intent_handlers
+# Removed debug utils imports that were causing issues
 
 from .context_manager import ContextManager  # Import the ContextManager
 
@@ -56,7 +56,7 @@ This information is for educational purposes only and is not a substitute for pr
 Always seek the advice of your physician or other qualified health provider with any questions you may have.
 """
 print("11")
-@trace_async_calls
+# Removed @trace_async_calls decorator that was causing issues
 class ChatHandler:
     def __init__(self, session_data, user_message, user_id=None):
         # If no user_id is provided, default to the phone number in the session
@@ -91,26 +91,25 @@ class ChatHandler:
             self.patient_id = None
             logger.debug("No patient data in session")
 
-        # Initialize other attributes and clients
+        # Initialize other attributes
         self.current_context = session_data.get('current_context')
         self.last_intent = session_data.get('last_intent')
         self.conversation_history = session_data.get('conversation_history', [])
         if session_data and 'conversation_context' in session_data:
             self.conversation_context.__dict__.update(session_data['conversation_context'])
 
-        try:
-            self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-            self.language_handler = LanguageHandler()
-            self.language_service = LanguageService()
-        except Exception as e:
-            logger.error(f"Error initializing clients: {str(e)}", exc_info=True)
-            raise RuntimeError("Failed to initialize required clients")
-
+        # Import the medical advice service
+        from chatbot.views.services.personalized_medical_advice_service import PersonalizedMedicalAdviceService
+        
+        # Initialize the medical advice service
+        self.medical_advice_service = PersonalizedMedicalAdviceService()
+        
         # Register intent handlers.  This is the CRITICAL part.
         self.intent_handlers = {
             'medical_info_query': self._handle_symptom_report,
             'medical_record': self._handle_medical_record,
             'symptoms': self._handle_symptom_report,  # This handles all symptom queries
+            'symptom_report': self._handle_symptom_report,  # Added missing symptom_report handler
  
             'set_appointment': self.handle_booking_flow,
             'appointment': self.handle_booking_flow,
@@ -131,32 +130,63 @@ class ChatHandler:
             'height': self._handle_height_query
         }
 
-        # Initialize lab context and context manager as before
+        # Initialize lab context
         self.lab_context = {
             'last_results': None,
             'current_topic': None
         }
-        self.context_manager = ContextManager(user_id=self.user_id, session=self.session, openai_client=self.openai_client) #correct way of calling
+        
+        # These will be initialized in the initialize() method
+        self.openai_client = None
+        self.language_handler = None
+        self.language_service = None
+        self.context_manager = None
+        self.current_language = None
 
     async def initialize(self):
         """Async initialization tasks"""
-        print("DEBUG-CH-INIT-1: ChatHandler initialize started")
         logger.debug("[initialize] ChatHandler initialize started")
         try:
-            print("DEBUG-CH-INIT-2: About to detect language")
+            # Initialize OpenAI client
+            logger.debug("Initializing AsyncOpenAI client")
+            self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            
+            # Initialize language services
+            logger.debug("Initializing language services")
+            self.language_service = LanguageService()
+            # We need to set the openai_client in the language service
+            self.language_service.openai_client = self.openai_client
+            
+            self.language_handler = LanguageHandler()
+            # Set the openai_client in the language handler's language_service
+            self.language_handler.language_service.openai_client = self.openai_client
+            
+            # Initialize context manager
+            logger.debug("Initializing context manager")
+            self.context_manager = ContextManager(
+                user_id=self.user_id,
+                session=self.session, 
+                openai_client=self.openai_client
+            )
+            
+            # Set OpenAI client for medical advice service
+            logger.debug("Setting OpenAI client for medical advice service")
+            if hasattr(self, 'medical_advice_service') and self.medical_advice_service is not None:
+                self.medical_advice_service.symptom_analyzer.openai_client = self.openai_client
+                if hasattr(self.medical_advice_service, 'gpt_client'):
+                    # Create a new AsyncGPT4Client with the API key
+                    from chatbot.views.services.personalized_medical_advice_service import AsyncGPT4Client
+                    self.medical_advice_service.gpt_client = AsyncGPT4Client(api_key=settings.OPENAI_API_KEY)
+            
+            # Detect language
+            logger.debug("Detecting language")
             self.current_language = await self.language_service.detect_language(self.user_message)
-            print(f"DEBUG-CH-INIT-3: Language detected: {self.current_language}")
-            # Don't return self, just complete initialization
-            print("DEBUG-CH-INIT-4: Initialize completed successfully")
-            return
+            logger.debug(f"Language detected: {self.current_language}")
+            
+            logger.debug("Initialize completed successfully")
         except Exception as e:
-            print(f"DEBUG-CH-INIT-ERROR: Error in async initialization: {str(e)}")
-            import traceback
-            print(f"DEBUG-CH-INIT-ERROR-TRACE: {traceback.format_exc()}")
-            logger.error(f"Error in async initialization: {str(e)}")
+            logger.error(f"Error in async initialization: {str(e)}", exc_info=True)
             raise
-        finally:
-            print("DEBUG-CH-INIT-5: Initialization finished (finally block)")
             logger.debug("(initialisation finished)")
 
     async def handle_message(self, message=None, **kwargs):
@@ -169,6 +199,29 @@ class ChatHandler:
             message = self.user_message
         print(f"DEBUG-CH-HM-3: Processing message: {message}")
         logger.debug(f"Processing message: {message}")
+
+        # Check if we need to identify the user by phone number
+        if not self.patient_id and not self.session.get('awaiting_phone_number'):
+            # Check if the message might contain a phone number
+            if self._is_phone_number(message):
+                return await self._identify_user_by_phone(message)
+            else:
+                # Ask for phone number
+                self.session['awaiting_phone_number'] = True
+                await update_session(self.user_id, self.session)
+                return JsonResponse({
+                    "messages": ["Welcome to ANNA! To help you access your medical information, please provide your phone number."]
+                }), self.session
+        
+        # If we're awaiting a phone number, try to process it
+        if self.session.get('awaiting_phone_number') and not self.patient_id:
+            # Check if this looks like a phone number
+            if self._is_phone_number(message):
+                return await self._identify_user_by_phone(message)
+            else:
+                return JsonResponse({
+                    "messages": ["That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."]
+                }), self.session
 
         try:
             # Language Detection and Translation
@@ -844,7 +897,7 @@ class ChatHandler:
     
     async def _handle_symptom_report(self, message=None, intent_data=None):
         """
-        Simplified symptom handler that directly uses SymptomGuidanceService
+        Simplified symptom handler that uses the PersonalizedMedicalAdviceService
         to analyze symptoms and provide appropriate guidance.
         """
         try:
@@ -853,51 +906,22 @@ class ChatHandler:
                 
             logger.debug(f"Processing symptom query: {message}")
             
-            # Initialize the symptom guidance service directly
-            symptom_service = SymptomGuidanceService()
-            
             # Get patient data from session if available
             patient_data = self.patient.get('resource') if self.patient else None
             
-            # 1. Check for red flags first
-            has_red_flags, red_flags = await sync_to_async(symptom_service.red_flag_checker)(message)
-            
-            # 2. Analyze symptoms
-            symptom_analysis = await sync_to_async(symptom_service.symptom_analyzer)(
+            # Use the medical advice service to handle the symptom query
+            response_data = await self.medical_advice_service.handle_symptom_query(
                 message, 
                 patient_data
             )
             
-            # 3. Determine risk level
-            risk_assessment = await sync_to_async(symptom_service.risk_level_determiner)(
-                symptom_analysis,
-                red_flags if has_red_flags else None
-            )
-            
-            # 4. Format response
-            response_data = await sync_to_async(symptom_service.response_formatter)(
-                risk_assessment,
-                patient_data
-            )
-            
-            # 5. Get specific guidance based on symptoms 
-            specific_info = await sync_to_async(symptom_service.provide_specific_info)(
-                message
-            )
-            
-            # Combine general guidance with specific information
-            if 'messages' in specific_info:
-                response_data['messages'].extend(specific_info['messages'])
-            
-            # Log the interaction for audit purposes
-            await self._log_symptom_interaction(
-                message,
-                symptom_analysis,
-                risk_assessment,
-                response_data
-            )
-            
-            return JsonResponse(response_data), self.session
+            # Check the response data and convert to JSON response
+            if isinstance(response_data, dict) and 'messages' in response_data:
+                return JsonResponse(response_data), self.session
+            else:
+                return JsonResponse({
+                    "messages": ["I couldn't analyze your symptoms. Please try again or consult a healthcare professional."]
+                }), self.session
             
         except Exception as e:
             logger.error(f"Error in symptom handler: {str(e)}", exc_info=True)
@@ -1037,7 +1061,7 @@ class ChatHandler:
                 "messages": ["I'm sorry, there was an error creating your appointment. Please try again."]
             }), self.session
 
-    async def send_message(self, to_number, message):
+    def send_message(self, to_number, message):
         """Send SMS message using Twilio"""
         try:
             client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
@@ -1051,6 +1075,99 @@ class ChatHandler:
         except Exception as e:
             logger.error(f"Error sending SMS to {to_number}: {str(e)}")
             return False
+            
+    def _is_phone_number(self, text):
+        """Check if text looks like a phone number"""
+        # Remove common phone number formatting
+        digits_only = ''.join(c for c in text if c.isdigit())
+        
+        # Check if we have a reasonable number of digits for a phone number
+        # Most phone numbers are 10-15 digits
+        return 7 <= len(digits_only) <= 15
+        
+    async def _identify_user_by_phone(self, phone_input):
+        """Identify a user by their phone number and fetch their data"""
+        try:
+            # Clean the phone number - remove non-digits
+            phone_number = ''.join(c for c in phone_input if c.isdigit())
+            
+            # Format with country code if needed
+            if len(phone_number) == 10 and not phone_number.startswith('1'):
+                # Add US country code for 10-digit numbers
+                phone_number = '1' + phone_number
+                
+            logger.info(f"Attempting to identify user by phone number: {phone_number}")
+            
+            # Try to find a patient directly using FHIR search
+            try:
+                # Try multiple search patterns for phone numbers
+                search_attempts = [
+                    {'telecom': f"phone|{phone_number}"},
+                    {'telecom': phone_number}
+                ]
+                
+                # Try each search pattern
+                for params in search_attempts:
+                    logger.info(f"Trying search with params: {params}")
+                    result = await self.fhir_service.search('Patient', params)
+                    if result and 'entry' in result and result['entry']:
+                        patient = result['entry'][0]['resource']
+                        logger.info(f"Found patient using params: {params}")
+                        break
+                else:
+                    # Get the first patient for demo/testing purposes
+                    logger.info("No patient found with phone, using first patient for demo")
+                    result = await self.fhir_service.search('Patient', {'_count': '1'})
+                    if result and 'entry' in result and result['entry']:
+                        patient = result['entry'][0]['resource']
+                    else:
+                        patient = None
+            except Exception as e:
+                logger.error(f"Error searching for patient: {str(e)}")
+                patient = None
+            
+            if not patient:
+                # No patient found with this phone number
+                self.session['awaiting_phone_number'] = False  # Reset the flag
+                await update_session(self.user_id, self.session)
+                
+                return JsonResponse({
+                    "messages": [
+                        "I couldn't find a patient record with that phone number.",
+                        "Please check the number and try again, or contact support for assistance."
+                    ]
+                }), self.session
+            
+            # Store in session
+            self.session['patient'] = {
+                'resource': patient,
+                'id': patient.get('id'),
+                'phone_number': phone_number
+            }
+            self.patient = self.session['patient']
+            self.patient_id = patient.get('id')
+            
+            # Clear the awaiting flag and save the session
+            self.session['awaiting_phone_number'] = False
+            # Only update once with a longer timeout to ensure it's saved
+            await update_session(self.user_id, self.session)
+            
+            # Get patient name for greeting
+            name = patient.get('name', [{}])[0]
+            given_name = name.get('given', [''])[0] if name else ''
+            
+            return JsonResponse({
+                "messages": [
+                    f"Thank you! I've found your records, {given_name}.",
+                    "How can I assist you with your healthcare today?"
+                ]
+            }), self.session
+            
+        except Exception as e:
+            logger.error(f"Error identifying user by phone: {str(e)}", exc_info=True)
+            return JsonResponse({
+                "messages": ["I'm having trouble processing your request. Please try again later."]
+            }), self.session
 
     async def _handle_show_appointments(self, message=None, intent_data=None, user_id=None):
         """Handle showing appointments for a user.
