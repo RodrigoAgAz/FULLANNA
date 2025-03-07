@@ -297,8 +297,36 @@ The user says: {user_input}
         Save the updated session.
         Ensure that the session backend is secure and encrypted.
         """
-        logger.info(f"Session saved for user {self.user_id} at {datetime.now().isoformat()}")
-        await update_session(self.user_id, self.session)
+        try:
+            # Ensure all session data is JSON serializable
+            # Convert any numpy arrays or other non-serializable objects
+            serializable_session = {}
+            for key, value in self.session.items():
+                if key == 'embeddings':
+                    # Make sure embeddings are lists not numpy arrays
+                    serializable_embeddings = {}
+                    for timestamp, embedding in value.items():
+                        if hasattr(embedding, 'tolist'):
+                            serializable_embeddings[timestamp] = embedding.tolist()
+                        else:
+                            serializable_embeddings[timestamp] = embedding
+                    serializable_session[key] = serializable_embeddings
+                else:
+                    serializable_session[key] = value
+            
+            logger.info(f"Session saved for user {self.user_id} at {datetime.now().isoformat()}")
+            await update_session(self.user_id, serializable_session)
+        except Exception as e:
+            logger.error(f"Error saving session: {str(e)}", exc_info=True)
+            # Fall back to just saving without embeddings if there's an error
+            try:
+                session_copy = self.session.copy()
+                if 'embeddings' in session_copy:
+                    del session_copy['embeddings']
+                await update_session(self.user_id, session_copy)
+                logger.info("Session saved without embeddings due to serialization error")
+            except Exception as e2:
+                logger.error(f"Complete failure saving session: {str(e2)}", exc_info=True)
 
     async def _maybe_summarize_history(self, topic: str):
         """
@@ -342,11 +370,16 @@ The user says: {user_input}
         Optionally extract key facts (e.g., conditions or medications) using spaCy.
         This method calls extract_medical_facts, which is a synchronous function.
         """
-        # Use sync_to_async to properly wrap the synchronous function
-        # This ensures the method correctly returns an awaitable result
-        extract_medical_facts_async = sync_to_async(extract_medical_facts)
-        facts = await extract_medical_facts_async(message_text)
-        return facts
+        try:
+            # Use sync_to_async to properly wrap the synchronous function
+            # This ensures the method correctly returns an awaitable result
+            extract_medical_facts_async = sync_to_async(extract_medical_facts)
+            facts = await extract_medical_facts_async(message_text)
+            logger.info(f"Extracted facts: {facts}")
+            return facts
+        except Exception as e:
+            logger.error(f"Error extracting user facts: {str(e)}", exc_info=True)
+            return {}
 
     async def retrieve_similar_messages(self, current_input: str, top_n: int = 5) -> List[Dict[str, Any]]:
         """

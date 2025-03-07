@@ -163,16 +163,41 @@ class ChatHandler:
             
             # Initialize context manager
             logger.debug("Initializing context manager")
-            self.context_manager = ContextManager(
-                user_id=self.user_id,
-                session=self.session, 
-                openai_client=self.openai_client
-            )
+            try:
+                # Make sure user_id is not None before creating context manager
+                if not self.user_id:
+                    logger.warning("No user_id available, using session ID as fallback")
+                    self.user_id = str(id(self.session))  # Generate a unique ID
+                
+                # Make sure session has conversation_history initialized
+                if 'conversation_history' not in self.session:
+                    self.session['conversation_history'] = []
+                
+                self.context_manager = ContextManager(
+                    user_id=self.user_id,
+                    session=self.session, 
+                    openai_client=self.openai_client
+                )
+                logger.debug("Context manager initialized successfully")
+            except Exception as context_error:
+                logger.error(f"Error initializing context manager: {str(context_error)}", exc_info=True)
+                # Create a fallback minimal context manager
+                from chatbot.views.handlers.context_manager import ContextManager
+                self.context_manager = ContextManager(
+                    user_id=str(id(self.session)),  # Generate a unique ID as fallback
+                    session={'conversation_history': []}, 
+                    openai_client=self.openai_client
+                )
             
             # Set OpenAI client for medical advice service
             logger.debug("Setting OpenAI client for medical advice service")
             if hasattr(self, 'medical_advice_service') and self.medical_advice_service is not None:
-                self.medical_advice_service.symptom_analyzer.openai_client = self.openai_client
+                # Ensure the openai_client is set directly at the PersonalizedMedicalAdviceService level
+                self.medical_advice_service.openai_client = self.openai_client
+                # Also set it for the symptom_analyzer that's within the service
+                if hasattr(self.medical_advice_service, 'symptom_analyzer'):
+                    self.medical_advice_service.symptom_analyzer.openai_client = self.openai_client
+                # Set the gpt_client if it exists
                 if hasattr(self.medical_advice_service, 'gpt_client'):
                     # Create a new AsyncGPT4Client with the API key
                     from chatbot.views.services.personalized_medical_advice_service import AsyncGPT4Client
@@ -249,12 +274,25 @@ class ChatHandler:
             logger.debug("Adding message to context manager")
             try:
                 print("DEBUG-CH-HM-13: Calling context_manager.add_message")
+                # Initialize context with current session data to ensure it's up-to-date
+                self.context_manager.session = self.session
                 await self.context_manager.add_message(self.user_id, self.user_message)
                 print("DEBUG-CH-HM-14: Message added to context manager")
             except Exception as cm_error:
                 print(f"DEBUG-CH-HM-ERROR: Error adding message to context manager: {str(cm_error)}")
                 import traceback
                 print(f"DEBUG-CH-HM-ERROR-TRACE: {traceback.format_exc()}")
+                logger.error(f"Context manager error: {str(cm_error)}", exc_info=True)
+                # Make sure there's a valid conversation history even if context manager fails
+                if 'conversation_history' not in self.session:
+                    self.session['conversation_history'] = []
+                # Add current message to history directly
+                self.session['conversation_history'].append({
+                    'message': self.user_message,
+                    'is_user': True,
+                    'timestamp': datetime.now().isoformat()
+                })
+                await update_session(self.user_id, self.session)
 
             try:
                 print("DEBUG-CH-HM-15: Getting context")
@@ -273,9 +311,10 @@ class ChatHandler:
                 print(f"DEBUG-CH-HM-ERROR: Error in facts extraction: {str(facts_error)}")
                 import traceback
                 print(f"DEBUG-CH-HM-ERROR-TRACE: {traceback.format_exc()}")
+                logger.error(f"Facts extraction error: {str(facts_error)}", exc_info=True)
                 # Set defaults if there's an error
-                context = {"summary": "", "recent_messages": []}
-                user_facts = {}
+                context = {"summary": "", "recent_messages": self.session.get('conversation_history', [])}
+                user_facts = self.session.get('user_facts', {})
                 new_facts = {}
 
             if new_facts:

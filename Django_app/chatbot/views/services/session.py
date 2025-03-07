@@ -51,6 +51,9 @@ class SessionManager:
         """Get Redis connection with proper error handling"""
         if self._redis_client is None:
             try:
+                if self._lock is None:
+                    self._lock = asyncio.Lock()
+                    
                 async with self._lock:
                     if self._redis_client is None:
                         await self._initialize_redis()
@@ -66,6 +69,7 @@ class SessionManager:
                 self._redis_client = None
                 raise  # Re-raise to ensure proper error handling
         else:
+            logger.warning("Redis connection not available, using in-memory storage")
             yield None
 
     async def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -250,7 +254,18 @@ async def get_session(session_id: str) -> Dict[str, Any]:
     return await session_manager.get_session(session_id)
 
 async def update_session(session_id: str, updates: Dict[str, Any]) -> bool:
-    return await session_manager.update_session(session_id, updates)
+    # Added basic validation to avoid sending None as updates
+    if not session_id or not updates:
+        logger.error("Invalid parameters for update_session: session_id or updates missing")
+        return False
+        
+    # Create a new dict to avoid modifying the original
+    safe_updates = {}
+    for k, v in updates.items():
+        if k and v is not None:  # Only include non-None values
+            safe_updates[k] = v
+    
+    return await session_manager.update_session(session_id, safe_updates)
 
 async def reset_session(session_id: str, preserve_patient: bool = True) -> Dict[str, Any]:
     return await session_manager.reset_session(session_id, preserve_patient)

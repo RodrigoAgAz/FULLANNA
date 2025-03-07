@@ -629,20 +629,25 @@ RESPONSE FORMAT: Return a JSON object with the following keys:
 # Personalized Medical Advice Service (Hybrid Approach, Async)
 # ------------------------------------------------------------------------------
 class PersonalizedMedicalAdviceService:
-    def __init__(self, gpt_client=None):
-        """Initialize with optional GPT client"""
+    def __init__(self, gpt_client=None, openai_client=None):
+        """Initialize with optional GPT client and/or OpenAI client"""
+        from django.conf import settings
+        from openai import AsyncOpenAI
+        
         # Set up GPT client
         if gpt_client:
             self.gpt_client = gpt_client
         else:
-            from django.conf import settings
             self.gpt_client = AsyncGPT4Client(api_key=settings.OPENAI_API_KEY)
+        
+        # Set up OpenAI client directly
+        self.openai_client = openai_client or AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
             
         # Use your actual FHIRService from your codebase
         self.fhir_service = FHIRService()
         
-        # Create symptom analyzer
-        self.symptom_analyzer = SymptomAnalyzer()
+        # Create symptom analyzer and pass the OpenAI client
+        self.symptom_analyzer = SymptomAnalyzer(openai_client=self.openai_client)
 
     async def get_personalized_advice(self, patient_id: str, user_query: str) -> str:
         """
@@ -709,10 +714,21 @@ class PersonalizedMedicalAdviceService:
                     # Get gender
                     gender = patient_data.get('gender', 'unknown')
             
-            # Build a prompt for personalized medical advice
+            # Build a prompt for personalized medical advice - only include data that came from FHIR
+            patient_info = []
+            if name != "there":
+                patient_info.append(f"Name: {name}")
+            if age != "unknown" and age:
+                patient_info.append(f"Age: {age}")
+            if gender != "unknown" and gender:
+                patient_info.append(f"Gender: {gender}")
+            
+            # Format patient info string or use generic greeting if no data available
+            patient_line = f"Patient: {', '.join(patient_info)}" if patient_info else "Patient"
+            
             prompt = f"""As a helpful medical advisor, provide personalized advice for this person:
 
-Patient: {name}, Age: {age}, Gender: {gender}
+{patient_line}
 Symptom query: "{message}"
 
 Please provide:
@@ -727,7 +743,16 @@ IMPORTANT: End with a clear disclaimer about this being educational not professi
 
             # Get personalized advice from GPT
             from openai import AsyncOpenAI
-            client = self.openai_client
+            from django.conf import settings
+            
+            # Use symptom_analyzer's client if available, or create a new one
+            if hasattr(self, 'symptom_analyzer') and hasattr(self.symptom_analyzer, 'openai_client'):
+                client = self.symptom_analyzer.openai_client
+            elif hasattr(self, 'gpt_client'):
+                client = self.gpt_client
+            else:
+                # Create a new client as fallback
+                client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
             
             response = await client.chat.completions.create(
                 model="gpt-4o-mini",
