@@ -1,9 +1,13 @@
 # anna_project/settings.py
 
 import os
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 from celery.schedules import crontab
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
+from sentry_sdk.integrations.celery import CeleryIntegration
 # Load environment variables
 load_dotenv()
 
@@ -17,8 +21,10 @@ SECRET_KEY = os.getenv('SECRET_KEY')
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = ['*']  # Adjust as needed for production
-print ("5")
+logger = logging.getLogger(__name__)
+logger.debug("Loading Django settings")
 INSTALLED_APPS = [
+    'django_prometheus',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -26,11 +32,13 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.messages',
     'rest_framework',
-    'chatbot', 
+    'chatbot',
+    'audit',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'chatbot.middleware.twilio_signature.TwilioSignatureMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'chatbot.middleware.CustomCsrfMiddleware',  # Replace the default CSRF middleware
@@ -72,16 +80,24 @@ DATABASES = {
 }
 
 
-REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
-REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-REDIS_DB = int(os.getenv('REDIS_DB', 0))
+# Redis configuration
+REDIS_URL = os.getenv('REDIS_URL', 'redis://redis:6379/0')
+# Parse REDIS_URL for backwards compatibility
+REDIS_HOST = os.getenv('REDIS_HOST', REDIS_URL.split('@')[-1].split(':')[0] if '@' in REDIS_URL else REDIS_URL.split('//')[1].split(':')[0])
+REDIS_PORT = int(os.getenv('REDIS_PORT', REDIS_URL.split(':')[-1].split('/')[0]))
+REDIS_DB = int(os.getenv('REDIS_DB', REDIS_URL.split('/')[-1]))
+
+# Session timeout in seconds
+SESSION_TTL_SECONDS = int(os.getenv('SESSION_TTL_SECONDS', 1800))
 
 # OpenAI API Key
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 # FHIR Server URL
 FHIR_SERVER_URL = os.getenv('FHIR_SERVER_URL', 'http://localhost:8080/fhir/')
-FHIR_VERIFY_SSL = False  # Set to False for development, True for production
+FHIR_VERIFY_SSL = os.getenv("FHIR_VERIFY_SSL", "false").lower() == "true"
+# Timeout for FHIR requests (seconds)
+FHIR_SERVER_TIMEOUT = int(os.getenv('FHIR_SERVER_TIMEOUT', 10))
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -105,23 +121,56 @@ STATIC_URL = '/static/'
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'filters': {
+        'require_debug_false': {
+            '()': 'django.utils.log.RequireDebugFalse',
+        },
+        'require_debug_true': {
+            '()': 'django.utils.log.RequireDebugTrue',
+        },
+        'redact_pii': {
+            '()': 'chatbot.utils.log_filters.RedactPIIFilter',
+        },
+    },
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
     'handlers': {
         'file': {
             'level': 'DEBUG',
             'class': 'logging.FileHandler',
             'filename': os.path.join(BASE_DIR, 'app.log'),
+            'formatter': 'verbose',
+            'filters': ['redact_pii'],
+        },
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+            'filters': ['redact_pii'],
         },
     },
     'loggers': {
         'django': {
-            'handlers': ['file'],
-            'level': 'DEBUG',
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
             'propagate': True,
+            'filters': ['redact_pii'],
         },
         'chatbot': {
-            'handlers': ['file'],
+            'handlers': ['file', 'console'],
             'level': 'DEBUG',
             'propagate': True,
+            'filters': ['redact_pii'],
+        },
+        'audit': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': True,
+            'filters': ['redact_pii'],
         },
     },
 }
@@ -132,25 +181,20 @@ TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER') 
 
+# Sentry Configuration
+if os.getenv("SENTRY_DSN"):
+    sentry_sdk.init(
+        dsn=os.getenv("SENTRY_DSN"),
+        integrations=[DjangoIntegration(), CeleryIntegration()],
+        traces_sample_rate=0.2,
+        send_default_pii=False,
+    )
 
 
-CELERY_BROKER_URL = f'redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}'  # Using existing Redis settings
+CELERY_BROKER_URL = os.getenv('REDIS_URL', f'redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}')
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
 
-CELERY_BEAT_SCHEDULE = {
-    'morning-medication-reminders': {
-        'task': 'chatbot.views.services.scheduler.process_medication_reminders',
-        'schedule': crontab(hour=9, minute=0),
-    },
-    'afternoon-medication-reminders': {
-        'task': 'chatbot.views.services.scheduler.process_medication_reminders',
-        'schedule': crontab(hour=14, minute=0),
-    },
-    'evening-medication-reminders': {
-        'task': 'chatbot.views.services.scheduler.process_medication_reminders',
-        'schedule': crontab(hour=20, minute=0),
-    },
-}
+# Removed in favor of consolidated schedule in celery.py
 
 # REST Framework settings
 REST_FRAMEWORK = {
@@ -171,4 +215,4 @@ CSRF_TRUSTED_ORIGINS = ['http://localhost:8000']  # Add your domains
 
 
 
-print("6")
+logger.debug("Finished loading Django settings")

@@ -2,25 +2,65 @@ import logging
 import json
 from datetime import datetime, timezone, timedelta
 import asyncio
+import time
 from redis import asyncio as aioredis
 from contextlib import asynccontextmanager
 from django.conf import settings
 from .fhir_service import FHIRService
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
-print ("38")
+
 class SessionManager:
+    # In-memory session fallback storage with timestamps
+    _memory_sessions: Dict[str, Dict] = {}
+    
     def __init__(self):
         self._redis_client = None
         self._lock = None  # Initialize in async context
-        self.session_timeout = timedelta(minutes=30)
+        self.session_timeout = timedelta(seconds=settings.SESSION_TTL_SECONDS)
         self.fhir_service = FHIRService()  # Using existing FHIRService
         self.redis_url = getattr(settings, 'REDIS_URL', 'redis://localhost:6379/0')
 
     def _get_session_key(self, session_id: str) -> str:
         """Get consistent session key format"""
         return f"chat_session:{session_id}"
+        
+    def cleanup_expired_memory_sessions(self):
+        """
+        Remove in-memory sessions that have expired according to TTL
+        This prevents memory leaks from abandoned sessions
+        """
+        now = time.time()
+        expired_keys = []
+        
+        for session_id, session_data in SessionManager._memory_sessions.items():
+            # Extract timestamp from session data
+            last_interaction = session_data.get('last_interaction')
+            if not last_interaction:
+                # No timestamp, consider expired
+                expired_keys.append(session_id)
+                continue
+                
+            try:
+                # Convert ISO timestamp to Unix time
+                if isinstance(last_interaction, str):
+                    last_time = datetime.fromisoformat(last_interaction.replace('Z', '+00:00'))
+                    last_unix_time = last_time.timestamp()
+                    
+                    # Check if expired based on TTL
+                    if now - last_unix_time > settings.SESSION_TTL_SECONDS:
+                        expired_keys.append(session_id)
+            except (ValueError, TypeError):
+                # Invalid timestamp format, consider expired
+                expired_keys.append(session_id)
+        
+        # Remove expired sessions
+        for key in expired_keys:
+            SessionManager._memory_sessions.pop(key, None)
+            
+        if expired_keys:
+            logger.info(f"Cleaned up {len(expired_keys)} expired memory sessions")
 
     async def initialize(self):
         """Initialize session manager for ASGI application"""
@@ -75,7 +115,10 @@ class SessionManager:
     async def get_session(self, session_id: str) -> Dict[str, Any]:
         """Get existing session or create new one"""
         try:
-            # Check in-memory sessions first
+            # Clean up expired memory sessions first
+            self.cleanup_expired_memory_sessions()
+            
+            # Check in-memory sessions
             if session_id in SessionManager._memory_sessions:
                 logger.info(f"Using in-memory session for {session_id}")
                 return SessionManager._memory_sessions[session_id]
@@ -112,7 +155,7 @@ class SessionManager:
                     await redis.set(
                         session_key,
                         json.dumps(new_session),
-                        ex=int(self.session_timeout.total_seconds())
+                        ex=settings.SESSION_TTL_SECONDS
                     )
                     # Store in memory too
                     SessionManager._memory_sessions[session_id] = new_session
@@ -125,9 +168,6 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Session operation failed: {e}")
             raise
-
-    # In-memory session fallback storage
-    _memory_sessions = {}
     
     async def update_session(self, session_id: str, session_data: Dict[str, Any]) -> None:
         """Update existing session"""
@@ -148,8 +188,10 @@ class SessionManager:
                 await redis.set(
                     session_key,
                     json.dumps(session_data),
-                    ex=int(self.session_timeout.total_seconds())
+                    ex=settings.SESSION_TTL_SECONDS
                 )
+                # Update memory cache
+                SessionManager._memory_sessions[session_id] = session_data
         except Exception as e:
             logger.error(f"Error updating session: {str(e)}")
             # Fall back to in-memory storage
@@ -175,15 +217,20 @@ class SessionManager:
     async def save_session(self, session_id: str, session_data: Dict[str, Any]) -> bool:
         """Save complete session data"""
         try:
+            # Update last interaction time
+            session_data['last_interaction'] = datetime.now(timezone.utc).isoformat()
+            
+            # Update memory cache
+            SessionManager._memory_sessions[session_id] = session_data
+            
             async with self.get_redis() as redis:
                 if redis is None:
                     return False
                 
-                session_data['last_interaction'] = datetime.now(timezone.utc).isoformat()
-                await redis.setex(
-                    f"chat_session:{session_id}",
-                    int(self.session_timeout.total_seconds()),
-                    json.dumps(session_data)
+                await redis.set(
+                    self._get_session_key(session_id),
+                    json.dumps(session_data),
+                    ex=settings.SESSION_TTL_SECONDS
                 )
                 return True
                 
@@ -272,4 +319,3 @@ async def reset_session(session_id: str, preserve_patient: bool = True) -> Dict[
 
 async def save_session(session_id: str, session_data: Dict[str, Any]) -> bool:
     return await session_manager.save_session(session_id, session_data)
-print ("39")

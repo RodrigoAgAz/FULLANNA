@@ -1,9 +1,35 @@
 version: '3.8'
 services:
+  anna:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - DEBUG=True          # Set to False in production
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-replace-in-production}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+      - FHIR_SERVER_URL=http://hapi-fhir:8080/fhir/
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - hapi-fhir
+    command: >
+      sh -c "python manage.py migrate && 
+             uvicorn anna_project.asgi:application --host 0.0.0.0 --port 8000 --reload"
+
   hapi-fhir:
     image: hapiproject/hapi:latest
     ports:
-      - "8080:8080"  # HAPI FHIR API port only; removed port 8000 mapping
+      - "8080:8080"  # HAPI FHIR API port
     volumes:
       - ./data/hapi:/data/hapi
     environment:
@@ -14,24 +40,81 @@ services:
       - hapi.fhir.allow_external_references=true
       - hapi.fhir.expunge_enabled=true
       - hapi.fhir.allow_multiple_delete=true
-      - REDIS_HOST=redis     # Connect to the 'redis' service
-      - REDIS_PORT=6379      # Default Redis port
-      - REDIS_DB=0           # Default Redis DB
-      - DEBUG=True          # Set to False in production
-      - SECRET_KEY=your-secret-key # Replace with a strong secret key!
     user: "1000:1000"
     restart: unless-stopped
-    depends_on:
-      - redis
 
   redis:
     image: redis:latest
     ports:
-      - "6379:6379"  # Expose port 6379 (optional, for external access/debugging)
+      - "6379:6379"
     volumes:
-      - redis-data:/data  # Persist Redis data
+      - redis-data:/data
     restart: unless-stopped
+    
+  celery-worker:
+    build: .
+    volumes:
+      - ./:/app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - DEBUG=True
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-replace-in-production}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+      - FHIR_SERVER_URL=http://hapi-fhir:8080/fhir/
+    depends_on:
+      - redis
+      - hapi-fhir
+    command: celery -A anna_project worker --loglevel=info
+    
+  celery-beat:
+    build: .
+    volumes:
+      - ./:/app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - DEBUG=True
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-replace-in-production}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+      - FHIR_SERVER_URL=http://hapi-fhir:8080/fhir/
+    depends_on:
+      - redis
+      - hapi-fhir
+      - celery-worker
+    command: celery -A anna_project beat --loglevel=info
+    
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+    
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
 
 volumes:
   hapi-data:
   redis-data:
+  grafana-data:

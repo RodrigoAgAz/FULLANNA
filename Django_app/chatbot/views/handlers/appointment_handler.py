@@ -11,7 +11,7 @@ from ..services.fhir_service import get_user_appointments, get_practitioner
 import logging
 
 logger = logging.getLogger('chatbot')
-print("9")
+logger.debug("Appointment handler module loaded")
 def handle_appointment_query(session, user_message):
     """Handle showing upcoming appointments"""
     try:
@@ -25,7 +25,7 @@ def handle_appointment_query(session, user_message):
         fhir_client = app_config.get_fhir_client()  # Using the correct config
         
         # Build the search parameters
-        current_time = datetime.now(ZoneInfo("UTC")).isoformat()
+        current_time = datetime.now(ZoneInfo(settings.TIME_ZONE)).isoformat()
         search_params = {
             "patient": f"Patient/{patient_id}",
             "date": f"ge{current_time}",
@@ -41,7 +41,7 @@ def handle_appointment_query(session, user_message):
         
         # Format appointments
         appointments = []
-        for entry in response['entry']:
+        for entry in response.get('entry', []):
             appt = entry['resource']
             
             # Skip non-booked appointments
@@ -50,7 +50,7 @@ def handle_appointment_query(session, user_message):
             
             # Get the appointment time
             start_time = datetime.fromisoformat(appt['start'].replace('Z', '+00:00'))
-            local_time = start_time.astimezone(ZoneInfo('America/New_York'))
+            local_time = start_time.astimezone(ZoneInfo(settings.TIME_ZONE))
             formatted_time = local_time.strftime("%A, %B %d, %Y at %I:%M %p %Z")
             
             # Get practitioner info
@@ -86,7 +86,7 @@ def handle_appointment_query(session, user_message):
         logger.error(f"Error handling appointment query: {str(e)}", exc_info=True)
         return "I'm sorry, I couldn't retrieve your appointments at this time. Please try again later."
 
-def handle_appointment_cancellation(session, user_message):
+async def handle_appointment_cancellation(session, user_message):
     """Handle appointment cancellation requests"""
     try:
         # Get FHIR client from app_config
@@ -110,7 +110,22 @@ def handle_appointment_cancellation(session, user_message):
                             appointment['status'] = 'cancelled'
                             fhir_client.update("Appointment", appt_id, appointment)
                             session.pop('cancellation_options', None)
-                            update_session(session['id'], session)
+                            # Use the user_id (from phone) rather than relying on session['id'] which may not exist
+                            user_id = session.get('phone_number') or session.get('user_id')
+                            await update_session(user_id, session)
+                            
+                            # Audit the cancellation
+                            from audit.utils import log_event
+                            log_event(
+                                actor=user_id,
+                                action="appointment.cancelled",
+                                resource=f"Appointment/{appt_id}",
+                                meta={
+                                    "patient_id": patient_id,
+                                    "appointment_status": "cancelled"
+                                }
+                            )
+                            
                             return "Your appointment has been cancelled. Is there anything else I can help you with?"
                     except Exception as e:
                         logger.error(f"Error cancelling appointment {appt_id}: {str(e)}")
@@ -118,7 +133,7 @@ def handle_appointment_cancellation(session, user_message):
                 return "Please select a valid appointment number from the list."
         
         # Get upcoming appointments
-        current_time = datetime.now(ZoneInfo("UTC")).isoformat()
+        current_time = datetime.now(ZoneInfo(settings.TIME_ZONE)).isoformat()
         search_params = {
             "patient": f"Patient/{patient_id}",
             "date": f"ge{current_time}",
@@ -137,7 +152,7 @@ def handle_appointment_cancellation(session, user_message):
         for i, entry in enumerate(appointments['entry'], 1):
             appt = entry['resource']
             start_time = datetime.fromisoformat(appt['start'].replace('Z', '+00:00'))
-            local_time = start_time.astimezone(ZoneInfo('America/New_York'))
+            local_time = start_time.astimezone(ZoneInfo(settings.TIME_ZONE))
             formatted_time = local_time.strftime("%A, %B %d at %I:%M %p")
             
             # Get practitioner info
@@ -157,11 +172,13 @@ def handle_appointment_cancellation(session, user_message):
             
         # Store options in session
         session['cancellation_options'] = options
-        update_session(session['id'], session)
+        # Use the user_id (from phone) rather than relying on session['id'] which may not exist
+        user_id = session.get('phone_number') or session.get('user_id')
+        await update_session(user_id, session)
         
         return "\n".join(messages)
         
     except Exception as e:
         logger.error(f"Error handling cancellation: {str(e)}")
         return "I'm sorry, I couldn't process your cancellation request at this time. Please try again later."
-print ("10")
+logger.debug("Appointment handler module initialization complete")

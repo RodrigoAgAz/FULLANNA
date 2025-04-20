@@ -56,9 +56,10 @@ import fhirclient.models.procedure as fhir_procedure
 import fhirclient.models.immunization as fhir_immunization
 
 # Logging setup
-logger = logging.getLogger("PreventiveCareReminders")
+import logging
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-print ("34")
+logger.debug("Preventive care reminder service module loaded")
 # ----------------------------------------------------------------------
 # REPLACE THESE WITH REAL CREDENTIALS / ENDPOINTS / OAUTH CONFIG
 # ----------------------------------------------------------------------
@@ -817,4 +818,4 @@ if __name__ == "__main__":
 
     # Option 2: Directly process (send) all reminders
     reminder_service.process_reminders()
-print ("35")
+logger.debug("Preventive care reminder service initialization complete")

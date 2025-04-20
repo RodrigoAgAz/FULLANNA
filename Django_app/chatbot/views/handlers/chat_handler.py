@@ -55,7 +55,7 @@ MEDICAL_DISCLAIMER = """
 This information is for educational purposes only and is not a substitute for professional medical advice.
 Always seek the advice of your physician or other qualified health provider with any questions you may have.
 """
-print("11")
+logger.debug("ChatHandler module loaded")
 # Removed @trace_async_calls decorator that was causing issues
 class ChatHandler:
     def __init__(self, session_data, user_message, user_id=None):
@@ -95,7 +95,14 @@ class ChatHandler:
         self.current_context = session_data.get('current_context')
         self.last_intent = session_data.get('last_intent')
         self.conversation_history = session_data.get('conversation_history', [])
+        
+        # Initialize conversation_context before updating it
+        self.conversation_context = None
+        # Import ContextManager here to avoid circular imports
+        from .context_manager import ContextManager
         if session_data and 'conversation_context' in session_data:
+            # Create a new ContextManager or initialize to empty object that can handle __dict__.update
+            self.conversation_context = ContextManager(self.user_id, session_data, None)
             self.conversation_context.__dict__.update(session_data['conversation_context'])
 
         # Import the medical advice service
@@ -106,28 +113,30 @@ class ChatHandler:
         
         # Register intent handlers.  This is the CRITICAL part.
         self.intent_handlers = {
-            'medical_info_query': self._handle_symptom_report,
-            'medical_record': self._handle_medical_record,
-            'symptoms': self._handle_symptom_report,  # This handles all symptom queries
-            'symptom_report': self._handle_symptom_report,  # Added missing symptom_report handler
+            # Medical-related intents - all routed through central medical query handler
+            'medical_info_query': self._handle_medical_query,
+            'symptom_report': self._handle_medical_query,
+            'symptoms': self._handle_medical_query,
+            'conditions': self._handle_medical_query,
+            'medications': self._handle_medical_query,
+            'immunizations': self._handle_medical_query,
+            'vaccines': self._handle_medical_query,
+            'lab_results': self._handle_medical_query,
+            'lab_results_query': self._handle_medical_query,
+            'screening': self._handle_medical_query,
+            'height': self._handle_medical_query,
+            'explanation_query': self._handle_medical_query,
  
+            # Non-medical intents remain unchanged
+            'medical_record': self._handle_medical_record,
             'set_appointment': self.handle_booking_flow,
             'appointment': self.handle_booking_flow,
             'show_appointments': self._handle_show_appointments,
             'nextAppointment': self._handle_show_appointments,
             'query_appointments': self._handle_show_appointments,
-            'immunizations': self._handle_immunizations_query,
-            'vaccines': self._handle_immunizations_query,
-            'lab_results': self._handle_lab_results,
-            'lab_results_query': self._handle_lab_results,
             'capabilities': self._handle_capabilities_query,
-            'explanation_query': self._handle_explanation_query,
             'reset_context': self._handle_reset_context,
-            'greeting': self._handle_greeting,
-            'conditions': self.handle_conditions_query,
-            'medications': self.handle_medications_query,
-            'screening': self._handle_screening,
-            'height': self._handle_height_query
+            'greeting': self._handle_greeting
         }
 
         # Initialize lab context
@@ -173,6 +182,10 @@ class ChatHandler:
                 if 'conversation_history' not in self.session:
                     self.session['conversation_history'] = []
                 
+                # Ensure ContextManager is imported properly - redundant with the import at the top
+                # but keeps consistency with the except block pattern
+                from chatbot.views.handlers.context_manager import ContextManager
+                
                 self.context_manager = ContextManager(
                     user_id=self.user_id,
                     session=self.session, 
@@ -182,12 +195,50 @@ class ChatHandler:
             except Exception as context_error:
                 logger.error(f"Error initializing context manager: {str(context_error)}", exc_info=True)
                 # Create a fallback minimal context manager
-                from chatbot.views.handlers.context_manager import ContextManager
-                self.context_manager = ContextManager(
-                    user_id=str(id(self.session)),  # Generate a unique ID as fallback
-                    session={'conversation_history': []}, 
-                    openai_client=self.openai_client
-                )
+                # We must import context_manager here to handle the case where the top-level import failed
+                try:
+                    from chatbot.views.handlers.context_manager import ContextManager
+                    self.context_manager = ContextManager(
+                        user_id=str(id(self.session)),  # Generate a unique ID as fallback
+                        session={'conversation_history': []}, 
+                        openai_client=self.openai_client
+                    )
+                    logger.debug("Fallback context manager initialized successfully")
+                except Exception as fallback_error:
+                    logger.critical(f"CRITICAL: Could not initialize fallback context manager: {str(fallback_error)}", exc_info=True)
+                    # If the module couldn't be imported, create a minimal object that mimics the required interface
+                    class MinimalContextManager:
+                        def __init__(self, **kwargs):
+                            self.session = kwargs.get('session', {'conversation_history': []})
+                            self.user_id = kwargs.get('user_id', 'fallback-user')
+                        
+                        async def add_message(self, user_id, message):
+                            if 'conversation_history' not in self.session:
+                                self.session['conversation_history'] = []
+                            self.session['conversation_history'].append({
+                                'message': message,
+                                'timestamp': datetime.now().isoformat(),
+                                'is_user': True
+                            })
+                            return self.session
+                        
+                        async def get_context(self, user_id):
+                            return {'summary': '', 'recent_messages': self.session.get('conversation_history', [])}
+                        
+                        async def get_user_facts(self, user_id):
+                            return self.session.get('user_facts', {})
+                        
+                        async def _extract_user_facts(self, message):
+                            return {}
+                        
+                        async def save_session(self):
+                            return True
+                    
+                    self.context_manager = MinimalContextManager(
+                        user_id=str(id(self.session)),
+                        session=self.session,
+                    )
+                    logger.warning("Using minimal fallback context manager implementation")
             
             # Set OpenAI client for medical advice service
             logger.debug("Setting OpenAI client for medical advice service")
@@ -216,13 +267,13 @@ class ChatHandler:
 
     async def handle_message(self, message=None, **kwargs):
         """Main message handling method, now with extensive debugging."""
-        print("DEBUG-CH-HM-1: Starting handle_message")
+        logger.debug("Starting handle_message")
         logger.debug("=== ENTER handle_message ===")
         
         if message is None:
-            print("DEBUG-CH-HM-2: No message provided, using self.user_message")
+            logger.debug("No message provided, using self.user_message")
             message = self.user_message
-        print(f"DEBUG-CH-HM-3: Processing message: {message}")
+        logger.debug(f"{message}")
         logger.debug(f"Processing message: {message}")
 
         # Check if we need to identify the user by phone number
@@ -250,38 +301,47 @@ class ChatHandler:
 
         try:
             # Language Detection and Translation
-            print("DEBUG-CH-HM-4: About to perform language detection")
+            logger.debug("About to perform language detection")
             logger.debug("Performing language detection")
-            print("DEBUG-CH-HM-5: Calling language_service.detect_language")
+            logger.debug("Calling language_service.detect_language")
             detected_lang = await self.language_service.detect_language(self.user_message)
-            print(f"DEBUG-CH-HM-6: Language detected: {detected_lang}")
+            logger.debug(f"{detected_lang}")
             
             if detected_lang != 'en':
-                print(f"DEBUG-CH-HM-7: Skipping translation (disabled)")
+                logger.debug(f"Skipping translation (disabled)")
                 logger.debug(f"Skipping translation from {detected_lang} to English")
                 # Skip translation and just use the original text
                 english_text = self.user_message
                 needs_translation = False
             else:
-                print("DEBUG-CH-HM-10: No translation needed (English detected)")
+                logger.debug("No translation needed (English detected)")
                 english_text = self.user_message
                 needs_translation = False
-            print(f"DEBUG-CH-HM-11: Text for processing: {english_text}")
+            logger.debug(f"{english_text}")
             logger.debug(f"Text for processing: {english_text}")
 
             # Context management
-            print("DEBUG-CH-HM-12: Starting context management")
+            logger.debug("Starting context management")
             logger.debug("Adding message to context manager")
             try:
-                print("DEBUG-CH-HM-13: Calling context_manager.add_message")
+                logger.debug("Calling context_manager.add_message")
                 # Initialize context with current session data to ensure it's up-to-date
+                # This ensures proper context persistence between turns
                 self.context_manager.session = self.session
+                
+                # Log the current session state before adding the message
+                logger.debug(f"{self.session.get('current_topic')}")
+                
+                # Add the message to update the context
                 await self.context_manager.add_message(self.user_id, self.user_message)
-                print("DEBUG-CH-HM-14: Message added to context manager")
+                logger.debug("Message added to context manager")
+                
+                # Check if the current_topic was updated properly
+                logger.debug(f"{self.context_manager.session.get('current_topic')}")
             except Exception as cm_error:
-                print(f"DEBUG-CH-HM-ERROR: Error adding message to context manager: {str(cm_error)}")
+                logger.debug(f"{str(cm_error)}")
                 import traceback
-                print(f"DEBUG-CH-HM-ERROR-TRACE: {traceback.format_exc()}")
+                logger.debug(f"{traceback.format_exc()}")
                 logger.error(f"Context manager error: {str(cm_error)}", exc_info=True)
                 # Make sure there's a valid conversation history even if context manager fails
                 if 'conversation_history' not in self.session:
@@ -295,64 +355,101 @@ class ChatHandler:
                 await update_session(self.user_id, self.session)
 
             try:
-                print("DEBUG-CH-HM-15: Getting context")
+                logger.debug("Getting context")
                 context = await self.context_manager.get_context(self.user_id)
-                print("DEBUG-CH-HM-16: Context retrieved")
+                logger.debug("Context retrieved")
                 
-                print("DEBUG-CH-HM-17: Getting user facts")
+                # Debug the current_topic to confirm it's being properly maintained
+                current_topic = context.get("current_topic", {})
+                logger.debug(f"{current_topic}")
+                
+                logger.debug("Getting user facts")
                 user_facts = await self.context_manager.get_user_facts(self.user_id)
-                print("DEBUG-CH-HM-18: User facts retrieved")
+                logger.debug("User facts retrieved")
                 
-                print("DEBUG-CH-HM-19: Extracting user facts from message")
+                logger.debug("Extracting user facts from message")
                 new_facts = await self.context_manager._extract_user_facts(self.user_message)
-                print(f"DEBUG-CH-HM-20: User facts extracted: {new_facts}")
+                logger.debug(f"{new_facts}")
+                
+                # Ensure we have the most current topic from session
+                # This is a critical part of fixing the missing context in follow-up questions
+                current_topic = self.session.get('current_topic', context.get("current_topic", {}))
+                
+                # Log what we're using to debug context persistence
+                logger.debug(f"{current_topic}")
+                logger.debug(f"{self.session.get('current_topic')}")
+                logger.debug(f"{context.get('current_topic')}")
+                
+                # Store the conversation context in an instance variable for medical query handling
+                self.context_info = {
+                    "summary": context.get("summary", ""),
+                    "recent_messages": context.get("recent_messages", []),
+                    "user_facts": user_facts,
+                    "current_topic": current_topic  # Give priority to the session value
+                }
+                logger.debug(f"Stored conversation context info: {self.context_info}")
             
             except Exception as facts_error:
-                print(f"DEBUG-CH-HM-ERROR: Error in facts extraction: {str(facts_error)}")
+                logger.debug(f"{str(facts_error)}")
                 import traceback
-                print(f"DEBUG-CH-HM-ERROR-TRACE: {traceback.format_exc()}")
+                logger.debug(f"{traceback.format_exc()}")
                 logger.error(f"Facts extraction error: {str(facts_error)}", exc_info=True)
                 # Set defaults if there's an error
                 context = {"summary": "", "recent_messages": self.session.get('conversation_history', [])}
                 user_facts = self.session.get('user_facts', {})
                 new_facts = {}
+                # Default context info - make sure to include current_topic if available
+                current_topic = self.session.get('current_topic', {})
+                self.context_info = {
+                    "summary": "", 
+                    "recent_messages": [], 
+                    "user_facts": {},
+                    "current_topic": current_topic  # Include current_topic even in error handling
+                }
 
             if new_facts:
-                print("DEBUG-CH-HM-21: Adding new facts to session")
+                logger.debug("Adding new facts to session")
                 logger.debug(f"Found new facts: {new_facts}")
                 if 'user_facts' not in self.session:
                     self.session['user_facts'] = {}
                 # Merge them
                 for k, v in new_facts.items():
                     self.session['user_facts'][k] = v
-                print("DEBUG-CH-HM-22: Updating session with new facts")
+                logger.debug("Updating session with new facts")
                 await update_session(self.user_id, self.session)
-                print("DEBUG-CH-HM-23: Session updated")
+                logger.debug("Session updated")
 
             # Prepare the context for intent detection
-            print("DEBUG-CH-HM-24: Preparing context for intent detection")
+            logger.debug("Preparing context for intent detection")
+            
+            # Ensure we're using the most up-to-date current_topic from session
+            current_topic = self.session.get('current_topic', context.get("current_topic", {}))
+            logger.debug(f"{current_topic}")
+            
             context_info = {
                 "summary": context["summary"],
                 "recent_messages": context["recent_messages"],
-                "user_facts": user_facts
+                "user_facts": user_facts,
+                "current_topic": current_topic  # Use the prioritized session value
             }
-            print(f"DEBUG-CH-HM-25: Context info prepared: {context_info}")
+            logger.debug(f"{context_info}")
 
             # --- Intent Detection ---
-            print("DEBUG-CH-HM-26: Starting intent detection")
+            logger.debug("Starting intent detection")
             logger.debug("Detecting intent")
             try:
-                print("DEBUG-CH-HM-27: Calling detect_intent")
+                logger.debug("Calling detect_intent")
                 intent_data = await detect_intent(
                     user_input=english_text,
                     conversation_context=context_info,
                     last_intent=self.session.get('last_intent')
                 )
-                print(f"DEBUG-CH-HM-28: Intent detected: {intent_data.get('intent')}")
+                logger.debug(f"{intent_data.get('intent')}")
+                logger.debug(f"Intent with context.current_topic = {context_info.get('current_topic')}")
             except Exception as intent_error:
-                print(f"DEBUG-CH-HM-ERROR: Error in intent detection: {str(intent_error)}")
+                logger.debug(f"{str(intent_error)}")
                 import traceback
-                print(f"DEBUG-CH-HM-ERROR-TRACE: {traceback.format_exc()}")
+                logger.debug(f"{traceback.format_exc()}")
                 # Provide default intent data if there's an error
                 intent_data = {"intent": "unknown", "confidence": 0.0, "entities": {}}
             logger.debug(f"Detected intent: {intent_data.get('intent')}, confidence: {intent_data.get('confidence')}")
@@ -373,13 +470,15 @@ class ChatHandler:
                     logger.debug("Cancelling booking")
                     self.session.pop('booking_state', None)
                     await update_session(self.user_id, self.session)
-                    return ["Booking cancelled. I'm here to help you with any questions you may have."], self.session
+                    return JsonResponse({
+                        "messages": ["Booking cancelled. I'm here to help you with any questions you may have."]
+                    }), self.session
                 
                 # Continue with booking flow if not cancelled
                 logger.debug("[handle_message] Handling booking flow")
                 response, self.session = await self.handle_booking_flow(self.user_message)
                 logger.debug(f"Booking flow returned response type: {type(response).__name__}")
-                print(f"DEBUG: Type of response in handle_message after booking flow: {type(response)}")
+                logger.debug(f"Type of response in handle_message after booking flow: {type(response)}")
                 
                 # Check for unawaited coroutine
                 if inspect.iscoroutine(response):
@@ -410,7 +509,7 @@ class ChatHandler:
                 # Start new booking flow if it's a fresh appointment request
                 logger.debug("[handle_message] Starting new booking flow")
                 response, self.session = await self.handle_booking_flow(self.user_message)
-                print(f"DEBUG: Type of response in handle_message after booking flow: {type(response)}")
+                logger.debug(f"Type of response in handle_message after booking flow: {type(response)}")
                 
                 # Check for unawaited coroutine
                 if inspect.iscoroutine(response):
@@ -575,65 +674,65 @@ class ChatHandler:
                         responses.append(unknown_intent_response)
 
             # Create JsonResponse at the end
-            print(f"DEBUG-CH-HM-FINAL-1: Creating final JsonResponse with {len(responses)} messages")
+            logger.debug(f"Creating final JsonResponse with {len(responses)} messages")
             logger.debug(f"Creating final JsonResponse with {len(responses)} messages")
             
             # Final check for coroutines
             if inspect.iscoroutine(responses):
-                print(f"DEBUG-CH-HM-FINAL-ERROR: Got unawaited coroutine {responses}")
+                logger.debug(f"Got unawaited coroutine {responses}")
                 logger.error(f"CRITICAL ERROR: Got unawaited coroutine {responses}")
                 logger.error(f"Attempting to await the coroutine")
-                print(f"DEBUG-CH-HM-FINAL-2: Attempting to await the coroutine")
+                logger.debug(f"Attempting to await the coroutine")
                 responses = await responses  # Try to fix it
-                print(f"DEBUG-CH-HM-FINAL-3: Successfully awaited coroutine")
+                logger.debug(f"Successfully awaited coroutine")
             
-            print(f"DEBUG-CH-HM-FINAL-4: Final response type: {type(responses)}")
-            print(f"DEBUG-CH-HM-FINAL-5: Is coroutine: {inspect.iscoroutine(responses)}")
+            logger.debug(f"{type(responses)}")
+            logger.debug(f"{inspect.iscoroutine(responses)}")
             
             # Create the response object
             final_response = JsonResponse({"messages": responses})
-            print(f"DEBUG-CH-HM-FINAL-6: Created JsonResponse object: {type(final_response)}")
-            print(f"DEBUG-CH-HM-FINAL-7: Is JsonResponse a coroutine? {inspect.iscoroutine(final_response)}")
+            logger.debug(f"{type(final_response)}")
+            logger.debug(f"Is JsonResponse a coroutine? {inspect.iscoroutine(final_response)}")
             
             # Create the return tuple
             return_value = (final_response, self.session)
-            print(f"DEBUG-CH-HM-FINAL-8: Return value created: {type(return_value)}")
-            print(f"DEBUG-CH-HM-FINAL-9: Is return value a coroutine? {inspect.iscoroutine(return_value)}")
+            logger.debug(f"{type(return_value)}")
+            logger.debug(f"Is return value a coroutine? {inspect.iscoroutine(return_value)}")
             
             # Return the tuple with response and session
             return return_value
 
         except Exception as e:
-            print(f"DEBUG-CH-HM-ERROR-FINAL: Error in handle_message: {str(e)}")
+            logger.debug(f"{str(e)}")
             import traceback
-            print(f"DEBUG-CH-HM-ERROR-FINAL-TRACE: {traceback.format_exc()}")
+            logger.debug(f"{traceback.format_exc()}")
             logger.error(f"Error handling message: {str(e)}", exc_info=True)
             
             error_response = JsonResponse({
                 "messages": ["I'm sorry, something went wrong while processing your request."]
             })
-            print(f"DEBUG-CH-HM-ERROR-FINAL-1: Created error JsonResponse: {type(error_response)}")
-            print(f"DEBUG-CH-HM-ERROR-FINAL-2: Is error response a coroutine? {inspect.iscoroutine(error_response)}")
+            logger.debug(f"{type(error_response)}")
+            logger.debug(f"Is error response a coroutine? {inspect.iscoroutine(error_response)}")
             
             return_tuple = (error_response, self.session)
-            print(f"DEBUG-CH-HM-ERROR-FINAL-3: Created error return tuple: {type(return_tuple)}")
-            print(f"DEBUG-CH-HM-ERROR-FINAL-4: Is error return tuple a coroutine? {inspect.iscoroutine(return_tuple)}")
+            logger.debug(f"{type(return_tuple)}")
+            logger.debug(f"Is error return tuple a coroutine? {inspect.iscoroutine(return_tuple)}")
             
             return return_tuple
 
         finally:
             # Store conversation_history and user_facts back to session
             try:
-                print("DEBUG-CH-HM-FINALLY-1: Saving conversation history and user facts to session")
+                logger.debug("Saving conversation history and user facts to session")
                 logger.debug("[handle_message] Saving conversation history and user facts to session")
                 await self.context_manager.save_session()
-                print("DEBUG-CH-HM-FINALLY-2: Session saved successfully")
+                logger.debug("Session saved successfully")
             except Exception as session_error:
-                print(f"DEBUG-CH-HM-FINALLY-ERROR: Failed to save session: {str(session_error)}")
+                logger.debug(f"{str(session_error)}")
                 import traceback
-                print(f"DEBUG-CH-HM-FINALLY-ERROR-TRACE: {traceback.format_exc()}")
+                logger.debug(f"{traceback.format_exc()}")
                 logger.error(f"[handle_message] Failed to save session: {str(session_error)}", exc_info=True)
-            print("DEBUG-CH-HM-FINALLY-3: Exiting handle_message")
+            logger.debug("Exiting handle_message")
             logger.debug("=== EXIT handle_message ===")
 
     async def _detect_conversation_topic(self, message):
@@ -685,7 +784,7 @@ class ChatHandler:
                 handler = step_handlers.get(booking_state['step'])
                 if handler:
                     response = await handler(booking_state)
-                    print(f"DEBUG: Type of response in handle_booking_flow after {booking_state['step']}: {type(response)}")  
+                    logger.debug(f"Type of response in handle_booking_flow after {booking_state['step']}: {type(response)}")  
                     return response
                 else:
                     logger.error(f"Invalid booking step: {booking_state['step']}")
@@ -699,7 +798,7 @@ class ChatHandler:
             if not practitioners:
                 return JsonResponse({
                     "messages": ["I apologize, but no healthcare providers are currently available."]
-                })
+                }), self.session
 
             # Initialize booking state
             self.session['booking_state'] = {
@@ -716,8 +815,8 @@ class ChatHandler:
                     "Or type 'cancel' to stop booking."
                 ]
             })
-            print(f"DEBUG: Type of response in handle_booking_flow before return: {type(response)}")  
-            return response
+            logger.debug(f"Type of response in handle_booking_flow before return: {type(response)}")  
+            return response, self.session
 
         except Exception as e:
             logger.error(f"Error in booking flow: {str(e)}", exc_info=True)
@@ -745,7 +844,7 @@ class ChatHandler:
         parsed_datetime, error_message = await self._parse_datetime_with_timezone(user_input)
         if error_message:
             # If parsing failed, give feedback and re-ask
-            return JsonResponse({"messages": [error_message]})
+            return JsonResponse({"messages": [error_message]}), self.session
 
         # If parsed correctly, continue with slot checking
         logger.debug(f"Looking for slot at time: {parsed_datetime.isoformat()}")
@@ -853,11 +952,12 @@ class ChatHandler:
             logger.error(f"Error in practitioner selection: {str(e)}", exc_info=True)
             return self._handle_booking_error()
 
-    async def _handle_booking_error(self):
+    async def _handle_booking_error(self, error_message=None):
         """Handle booking flow errors uniformly"""
         self.session.pop('booking_state', None)
+        message = error_message or "I'm sorry, there was an error processing your booking request. Please try again."
         return JsonResponse({
-            "messages": ["I'm sorry, there was an error processing your booking request. Please try again."]
+            "messages": [message]
         }), self.session
 
     async def _handle_booking_confirmation(self, booking_state):
@@ -1186,9 +1286,17 @@ class ChatHandler:
             self.patient = self.session['patient']
             self.patient_id = patient.get('id')
             
-            # Clear the awaiting flag and save the session
+            # Clear the awaiting flag
             self.session['awaiting_phone_number'] = False
-            # Only update once with a longer timeout to ensure it's saved
+            
+            # Update current_topic in session to track context for follow-up questions
+            self.session['current_topic'] = {
+                'name': 'patient_identification',
+                'type': 'authentication',
+                'last_updated': datetime.now().isoformat()
+            }
+            
+            # Save the session with all updates
             await update_session(self.user_id, self.session)
             
             # Get patient name for greeting
@@ -2099,6 +2207,16 @@ class ChatHandler:
                     "messages": ["I apologize, but there are no available appointment slots at this time."],
                     "type": "error"
                 }), self.session
+                
+            # Initialize the booking state with initial_choice step (not select_practitioner_type)
+            # This fixes the mismatch with the step names in handle_booking_flow
+            self.session['booking_state'] = {
+                'step': 'initial_choice',  # Changed from 'select_practitioner_type' to match handler
+                'practitioners': practitioners,
+                'slots': available_slots,
+                'appointment_info': {}
+            }
+            await update_session(self.user_id, self.session)
 
             return JsonResponse({
                 "messages": ["Please select a healthcare provider and preferred time from the available slots:"],
@@ -2408,9 +2526,285 @@ class ChatHandler:
         except Exception as e:
             logger.error(f"Error formatting response: {str(e)}")
             return "Error displaying results. Please consult your healthcare provider."
+    async def _handle_medical_query(self, message=None, intent_data=None):
+        """
+        Centralized handler for all medical-related queries.
+        Routes all medical questions through the PersonalizedMedicalAdviceService.
+        """
+        try:
+            if message is None:
+                message = self.user_message
+                
+            logger.debug(f"Processing medical query: {message} with intent: {intent_data.get('intent')}")
+            logger.debug(f"Processing query with intent: {intent_data.get('intent')}")
+            
+            # Get patient data from session if available
+            patient_data = self.patient.get('resource') if self.patient else None
+            intent = intent_data.get('intent')
+            entities = intent_data.get('entities', {})
+            
+            # Extract topic and symptom info from entities
+            topic = entities.get('topic', message)
+            symptom_description = entities.get('symptom_description', message)
+            symptom_keyphrase = entities.get('symptom_keyphrase')
+            
+            # Create context info with intent for the service
+            context_info = self.context_info.copy() if self.context_info else {}
+            context_info['intent'] = intent
+            
+            # Debug logs
+            logger.debug(f"Using context_info: {context_info}")
+            logger.debug(f"Using topic: {topic}")
+            if symptom_keyphrase:
+                logger.debug(f"Using symptom_keyphrase: {symptom_keyphrase}")
+            
+            # Handle issue reports (new intent for any health issue)
+            if intent == 'issue_report':
+                # Get additional FHIR resources that might be relevant
+                additional_data = {}
+                
+                # Get conditions data if available
+                if self.patient_id:
+                    try:
+                        conditions = await self.fhir_service.search("Condition", {
+                            "patient": f"Patient/{self.patient_id}",
+                            "status": "active", 
+                            "_sort": "-recorded-date"
+                        })
+                        if conditions:
+                            additional_data = conditions
+                            
+                        # Also try to get medications and allergies
+                        try:
+                            medications = await self.fhir_service.search("MedicationStatement", {
+                                "patient": f"Patient/{self.patient_id}", 
+                                "status": "active"
+                            })
+                            # Merge with additional_data if we got medications
+                            if medications and 'entry' in medications:
+                                if 'entry' not in additional_data:
+                                    additional_data['entry'] = []
+                                additional_data['entry'].extend(medications['entry'])
+                        except Exception as med_error:
+                            logger.error(f"Error fetching medications: {str(med_error)}")
+                            
+                        try:
+                            allergies = await self.fhir_service.search("AllergyIntolerance", {
+                                "patient": f"Patient/{self.patient_id}"
+                            })
+                            # Merge with additional_data if we got allergies
+                            if allergies and 'entry' in allergies:
+                                if 'entry' not in additional_data:
+                                    additional_data['entry'] = []
+                                additional_data['entry'].extend(allergies['entry'])
+                        except Exception as allergy_error:
+                            logger.error(f"Error fetching allergies: {str(allergy_error)}")
+                            
+                    except Exception as e:
+                        logger.error(f"Error fetching conditions: {str(e)}")
+                
+                # Call the medical advice service with the issue report
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    symptom_description, 
+                    patient_data,
+                    topic=symptom_keyphrase,  # Use the extracted keyphrase if available
+                    additional_data=additional_data,
+                    conversation_context=context_info
+                )
+                
+                # Update the session with the current topic
+                if symptom_keyphrase:
+                    self.session['current_topic'] = {
+                        'name': symptom_keyphrase,
+                        'type': 'issue_report',
+                        'last_updated': datetime.now().isoformat()
+                    }
+                elif 'extracted_topic' in response_data:
+                    self.session['current_topic'] = {
+                        'name': response_data['extracted_topic'],
+                        'type': 'issue_report',
+                        'last_updated': datetime.now().isoformat()
+                    }
+                await update_session(self.user_id, self.session)
+                logger.debug(f"Updated session with current_topic: {self.session.get('current_topic')}")
+                
+            # General medical questions and explanation queries
+            elif intent in ['medical_info_query', 'explanation_query']:
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    topic=topic,
+                    conversation_context=context_info
+                )
+                
+            # Symptom-related queries
+            elif intent in ['symptom_report', 'symptoms']:
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    conversation_context=context_info
+                )
+                
+            # Patient-specific condition queries
+            elif intent == 'conditions':
+                # Get conditions data if available
+                conditions = None
+                if self.patient_id:
+                    try:
+                        conditions = await self.fhir_service.search("Condition", {
+                            "patient": f"Patient/{self.patient_id}",
+                            "_sort": "-recorded-date"
+                        })
+                    except Exception as e:
+                        logger.error(f"Error fetching conditions: {str(e)}")
+                
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    topic="medical conditions",
+                    additional_data=conditions,
+                    conversation_context=self.context_info
+                )
+                
+            # Patient-specific medication queries
+            elif intent == 'medications':
+                # Get medications data if available
+                medications = None
+                if self.patient_id:
+                    try:
+                        medications = await self.fhir_service.search("MedicationStatement", {
+                            "patient": f"Patient/{self.patient_id}", 
+                            "status": "active"
+                        })
+                    except Exception as e:
+                        logger.error(f"Error fetching medications: {str(e)}")
+                
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    topic="medications",
+                    additional_data=medications,
+                    conversation_context=self.context_info
+                )
+                
+            # Patient-specific immunization queries
+            elif intent in ['immunizations', 'vaccines']:
+                # Get immunizations data if available
+                immunizations = None
+                if self.patient_id:
+                    try:
+                        immunizations = await self.fhir_service.search("Immunization", {
+                            "patient": f"Patient/{self.patient_id}"
+                        })
+                    except Exception as e:
+                        logger.error(f"Error fetching immunizations: {str(e)}")
+                
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    topic="immunizations",
+                    additional_data=immunizations,
+                    conversation_context=self.context_info
+                )
+                
+            # Patient-specific lab result queries
+            elif intent in ['lab_results', 'lab_results_query']:
+                # Get lab results data if available
+                lab_results = None
+                if self.patient_id:
+                    try:
+                        lab_results = await self.fhir_service.search("DiagnosticReport", {
+                            "patient": f"Patient/{self.patient_id}",
+                            "_sort": "-date"
+                        })
+                    except Exception as e:
+                        logger.error(f"Error fetching lab results: {str(e)}")
+                
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    topic="lab results",
+                    additional_data=lab_results,
+                    conversation_context=self.context_info
+                )
+                
+            # Patient-specific screening queries
+            elif intent == 'screening':
+                # For screening-related queries
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    topic="health screenings",
+                    conversation_context=self.context_info
+                )
+                
+            # Patient-specific height queries
+            elif intent == 'height':
+                height = None
+                if self.patient and self.patient.get('resource'):
+                    # Try to extract height from patient extensions
+                    patient_resource = self.patient['resource']
+                    for ext in patient_resource.get('extension', []):
+                        if ext.get('url') == "http://example.org/fhir/StructureDefinition/height":
+                            height = ext.get('valueQuantity', {})
+                            break
+                
+                response_data = await self.medical_advice_service.handle_symptom_query(
+                    message, 
+                    patient_data,
+                    topic="height information",
+                    additional_data=height,
+                    conversation_context=self.context_info
+                )
+                
+            # Fallback for unhandled medical intents
+            else:
+                response_data = {
+                    "messages": ["I'm not sure how to handle that specific medical query. Could you try rephrasing?"]
+                }
+            
+            # Make sure we update the current_topic in the session after processing a medical query
+            # This is critical for the symptom analysis context persistence
+            if intent in ['symptom_report', 'symptoms'] and topic:
+                identified_topic = topic
+                logger.debug(f"Setting current_topic to: {identified_topic}")
+                
+                # Create a properly structured current_topic for the session
+                self.session['current_topic'] = {
+                    'name': identified_topic,
+                    'type': 'symptom_report',
+                    'last_updated': datetime.now().isoformat()
+                }
+                
+                # Save session explicitly to ensure persistence
+                await update_session(self.user_id, self.session)
+                logger.debug(f"Updated session with current_topic: {self.session.get('current_topic')}")
+                
+            # Check the response data and convert to JSON response
+            if isinstance(response_data, dict) and 'messages' in response_data:
+                # Ensure all messages are strings
+                if not all(isinstance(msg, str) for msg in response_data['messages']):
+                    response_data['messages'] = [str(msg) if not isinstance(msg, str) else msg 
+                                               for msg in response_data['messages']]
+                return JsonResponse(response_data), self.session
+            else:
+                # Format as a proper response if not already
+                return JsonResponse({
+                    "messages": [response_data] if isinstance(response_data, str) else ["I couldn't process your medical query. Please try a different question."]
+                }), self.session
+            
+        except Exception as e:
+            logger.error(f"Error in medical query handler: {str(e)}", exc_info=True)
+            return JsonResponse({
+                "messages": [
+                    "I apologize, but I encountered an error processing your request.",
+                    "If you're experiencing a medical emergency, please call emergency services immediately."
+                ]
+            }), self.session
+    
     async def _handle_screening(self, message=None, intent_data=None):
-       """Placeholder for screening intent handler."""
-       return ["This is a placeholder for screening information."], self.session
+       """Placeholder for screening intent handler - now handled by _handle_medical_query."""
+       return await self._handle_medical_query(message, intent_data)
 
     async def _parse_lab_query(self, query, context=None):
         """Parse lab query with improved date handling and context awareness"""
@@ -2644,5 +3038,6 @@ class ChatHandler:
         response += "- General health information\n"
         response += "Or you can ask 'what can you do' to see all my capabilities."
 
-        return [response], self.session
+        # Return a JsonResponse object instead of a raw list to avoid type mismatch
+        return JsonResponse({"messages": [response]}), self.session
      

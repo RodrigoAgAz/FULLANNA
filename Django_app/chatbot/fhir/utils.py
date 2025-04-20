@@ -74,6 +74,23 @@ class FHIRClient:
         except Exception as e:
             logger.error(f"Error fetching medications: {e}")
             return None
+            
+    def search(self, resource_type, params):
+        """Generic search method for FHIR resources"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/{resource_type}",
+                params=params,
+                headers=self.headers,
+                timeout=self.timeout
+            )
+            if response.status_code == 200:
+                return response.json()
+            logger.warning(f"FHIR search failed with status {response.status_code}: {response.text}")
+            return None
+        except Exception as e:
+            logger.error(f"Error searching {resource_type}: {e}")
+            return None
 
 def detect_intent(text):
     """Detect intents from user input"""

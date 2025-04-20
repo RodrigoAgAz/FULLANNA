@@ -8,6 +8,8 @@ and enhanced topic & fact extraction.
 """
 
 import logging
+logger = logging.getLogger(__name__)
+
 import json
 import re
 from datetime import datetime
@@ -37,7 +39,7 @@ import django
 from asgiref.sync import sync_to_async
 # Session update function (ensure this function handles encryption and secure storage)
 from chatbot.views.services.session import update_session
-print ("15")
+logger.debug("Context manager module loaded")
 # ---------------------------
 # Initialize Global Components
 # ---------------------------
@@ -81,14 +83,23 @@ logger = logging.getLogger(__name__)
 def redact_sensitive_info(text: str) -> str:
     """
     Use Microsoft Presidio to detect and redact PHI in the text.
+    Then apply additional PII redaction using our custom security module.
     """
     try:
+        # First pass with Presidio for comprehensive PHI detection
         results = presidio_analyzer.analyze(text=text, language="en")
         for result in results:
             # Replace each detected entity with [REDACTED]
             text = text.replace(result.entity_text, "[REDACTED]")
+            
+        # Second pass with our custom redaction for general PII
+        from chatbot.utils.security import redact_pii
+        text = redact_pii(text)
     except Exception as e:
         logger.error(f"Error in PHI redaction: {str(e)}", exc_info=True)
+        # Fall back to basic redaction if Presidio fails
+        from chatbot.utils.security import redact_pii
+        text = redact_pii(text)
     return text
 
 def generate_embedding(text: str) -> np.ndarray:
@@ -221,14 +232,21 @@ class ContextManager:
         # Extract additional facts from the raw message using spaCy.
         extracted_facts = extract_medical_facts(message)
 
+        # Encrypt the original message before storing
+        from chatbot.utils.security import encrypt_message
+        encrypted_message = encrypt_message(message)
+        
         message_entry = {
             "message": redacted_message,            # Redacted version for storage
-            "original_message": message,            # Raw text (ensure strict access controls)
+            "encrypted_message": encrypted_message, # Encrypted original message
             "is_user": True,
             "timestamp": timestamp,
             "topic": topic,
             "facts": extracted_facts
         }
+        
+        # Use redacted message for all logging
+        logger.debug(f"Processing message: {redacted_message}")
 
         self.conversation_history.append(message_entry)
         self.session["conversation_history"] = self.conversation_history
@@ -238,11 +256,68 @@ class ContextManager:
         self.embeddings[timestamp] = embedding.tolist()  # Save as list for JSON serialization
         self.session["embeddings"] = self.embeddings
 
+        # Update current_topic in session for proper follow-up question handling
+        await self.update_current_topic(topic, {
+            "facts": extracted_facts,
+            "timestamp": timestamp
+        })
+
         # Update the summary for the specific topic if necessary.
         await self._maybe_summarize_history(topic)
 
         logger.info(f"Added message for user {user_id} with topic '{topic}' at {timestamp}")
         await self.save_session()
+
+    async def update_current_topic(self, topic_name: str, topic_data: Dict = None):
+        """
+        Update the current topic in the session to support follow-up question processing.
+        This creates a properly structured current_topic that intent_service.py expects.
+        
+        Args:
+            topic_name: String name of the topic (e.g., 'lab_results', 'symptoms')
+            topic_data: Optional dictionary of additional metadata for the topic
+        """
+        if topic_data is None:
+            topic_data = {}
+            
+        # Map topic from classifier to intent service's expected topic types
+        topic_type_mapping = {
+            "scheduling": "appointment",
+            "medication": "medication",
+            "symptoms": "symptom_report",
+            "general": "general",
+            # Add explicit mappings for symptom categories
+            "back_pain": "symptom_report",
+            "headache": "symptom_report", 
+            "leg_pain": "symptom_report",
+            "chest_pain": "symptom_report",
+            "abdominal_pain": "symptom_report",
+            "arm_pain": "symptom_report",
+            "knee_pain": "symptom_report",
+            "foot_pain": "symptom_report", 
+            "hand_pain": "symptom_report",
+            "ankle_pain": "symptom_report",
+        }
+        
+        # Create a properly structured current_topic that intent_service.py expects
+        current_topic = {
+            'name': topic_name,
+            'type': topic_type_mapping.get(topic_name, topic_name),
+            'last_updated': datetime.now().isoformat()
+        }
+        
+        # Add any additional metadata
+        for key, value in topic_data.items():
+            if key not in current_topic:
+                current_topic[key] = value
+        
+        # Store in session
+        self.session['current_topic'] = current_topic
+        logger.info(f"Updated current topic to: {topic_name}")
+        logger.info(f"Current topic structure: {current_topic}")
+        
+        # Debug logging
+        logger.debug(f"Updated current_topic to {current_topic}")
 
     async def get_context(self, user_id: str, current_topic: str = "general") -> Dict[str, Any]:
         """
@@ -301,6 +376,11 @@ The user says: {user_input}
             # Ensure all session data is JSON serializable
             # Convert any numpy arrays or other non-serializable objects
             serializable_session = {}
+            
+            # Log key parts of the session we care about for debugging
+            logger.info(f"Preparing to save session with current_topic: {self.session.get('current_topic')}")
+            logger.debug(f"Current_topic before serialization: {self.session.get('current_topic')}")
+            
             for key, value in self.session.items():
                 if key == 'embeddings':
                     # Make sure embeddings are lists not numpy arrays
@@ -314,8 +394,18 @@ The user says: {user_input}
                 else:
                     serializable_session[key] = value
             
+            # Double-check current_topic is properly included before saving
+            if 'current_topic' in self.session and 'current_topic' not in serializable_session:
+                serializable_session['current_topic'] = self.session['current_topic']
+                logger.warning("Had to manually add current_topic to serializable session")
+            
             logger.info(f"Session saved for user {self.user_id} at {datetime.now().isoformat()}")
+            logger.debug(f"Current_topic in serializable session: {serializable_session.get('current_topic')}")
+            
+            # Save the session
             await update_session(self.user_id, serializable_session)
+            logger.info("Session successfully updated")
+            
         except Exception as e:
             logger.error(f"Error saving session: {str(e)}", exc_info=True)
             # Fall back to just saving without embeddings if there's an error
@@ -398,4 +488,4 @@ The user says: {user_input}
         top_messages = [msg for sim, msg in similarities[:top_n]]
         return top_messages
 
-print ("this script is working just fine ")
+logger.debug("Context manager initialization complete")

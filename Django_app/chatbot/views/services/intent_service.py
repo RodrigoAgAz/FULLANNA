@@ -20,14 +20,14 @@ from chatbot.views.services.language_service import LanguageService
 from ..utils.constants import OPENAI_MODEL
 
 logger = logging.getLogger('chatbot')
-print ("23.5")
+logger.debug("Intent service module loaded")
 # Global fallback cache for GPT fallback responses (to reduce redundant API calls)
 FALLBACK_CACHE = {}
 
 # ============================================
 #   FHIR Client Initialization (async)
 # ============================================
-
+#figure out if any of this shit is necessary and wht it is exactly
 def get_async_fhir_client():
     """
     Asynchronously get a configured FHIR client instance.
@@ -79,6 +79,7 @@ class Intent(Enum):
     CONDITION_QUERY = 'condition_query'
     MENTAL_HEALTH_QUERY = 'mental_health_query'
     SCREENING = 'screening'
+    ISSUE_REPORT = 'issue_report'  # New intent for any user-reported health issue
     UNKNOWN = 'unknown'
 
 @dataclass
@@ -174,10 +175,12 @@ CONDITION_PATTERNS_RAW = [
 COMPILED_CONDITION_PATTERNS = [re.compile(p, flags=re.IGNORECASE) for p in CONDITION_PATTERNS_RAW]
 
 # --- Screening Patterns ---
+# Only match screening intent in the context of a response to a screening reminder
+# Rather than detecting general questions about screenings/health checks
 SCREENING_PATTERNS_RAW = [
-    r'screenings?', r'health\s+check(?:-up|up)?', r'medical\s+(?:test|exam)',
-    r'what\s+screenings\s+should\s+i\s+get', r'preventive\s+care',
-    r'preventative\s+exams?', r'health\s+preventive\s+measures?'
+    r'screening\s+reminder', r'responding\s+to\s+screening',
+    r'about\s+(?:the|my|your)\s+screening\s+(?:reminder|notification|message)',
+    r'received\s+(?:a|the)\s+screening'
 ]
 COMPILED_SCREENING_PATTERNS = [re.compile(p, flags=re.IGNORECASE) for p in SCREENING_PATTERNS_RAW]
 
@@ -352,7 +355,45 @@ async def detect_intent(
             "entities": {"action": "view", "original_text": user_input}
         }
 
-    # 2.4 Symptom Report
+    # 2.4 Health Issue Detection (combines the new issue_report intent with traditional symptom reporting)
+    # Check for general health issue indicators first 
+    health_terms = [
+        r'\b(?:symptom|feeling|suffering|experiencing|having)\b',
+        r'\b(?:pain|ache|sore|hurt|discomfort)\b',
+        r'\b(?:sick|ill|unwell|not well)\b',
+        r'(?:problem with|issue with|trouble with)',
+        r'\b(?:diagnosed|condition)\b',
+        r'(?:can\'t sleep|insomnia|tired|fatigue)',
+        r'\b(?:cough|fever|rash|dizziness|swelling)\b'
+    ]
+    
+    is_general_health_issue = False
+    for pattern in health_terms:
+        if re.search(pattern, original_message, re.IGNORECASE):
+            is_general_health_issue = True
+            logger.info(f"Detected general health issue pattern: {pattern}")
+            break
+    
+    # If it's a general health issue but not matching specific symptom categories,
+    # use the new issue_report intent
+    if is_general_health_issue:
+        # Extract a symptom keyphrase if possible (this will be None if no service exists yet)
+        symptom_keyphrase = None
+        # We can't directly call the medical_advice_service here since it's not available
+        # The actual keyphrase extraction will happen in the handler
+        
+        logger.info(f"Regex detection: General health issue detected, using issue_report intent.")
+        return {
+            "intent": Intent.ISSUE_REPORT.value,
+            "confidence": 0.95,
+            "entities": {
+                "symptom_description": original_message, 
+                "original_text": user_input,
+                "symptom_keyphrase": symptom_keyphrase  # Will be None here, extracted later in handler
+            }
+        }
+    
+    # Fall back to traditional symptom category detection for specific symptoms
     for category, patterns in COMPILED_SYMPTOM_PATTERNS.items():
         if any(pattern.search(original_message) for pattern in patterns):
             logger.info(f"Regex detection: Symptom report pattern matched for category {category}.")
@@ -368,10 +409,41 @@ async def detect_intent(
         'levels': re.compile(r'\b(levels|values|numbers|results)\b', flags=re.IGNORECASE),
         'change': re.compile(r'\b(increase|decrease|improve|change|modify)\b', flags=re.IGNORECASE)
     }
+    
+    # Debug logging for follow-up detection
+    logger.debug(f"Checking for anaphora in: {original_message}")
+    if conversation_context:
+        current_topic_info = conversation_context.get('current_topic', {})
+        logger.debug(f"With context: {current_topic_info}")
+        logger.debug(f"Context type: {type(current_topic_info)}")
+        logger.debug(f"Full conversation context: {conversation_context}")
+    else:
+        logger.debug("No conversation context provided")
+        
+    # Track which pattern matched for better debugging
+    matched_pattern = None
+    for pattern_name, pattern in anaphora_patterns.items():
+        if pattern.search(original_message):
+            matched_pattern = pattern_name
+            logger.debug(f"Matched anaphora pattern: {pattern_name}")
+            break
+    
     if any(pattern.search(original_message) for pattern in anaphora_patterns.values()) and conversation_context and conversation_context.get('current_topic'):
         current_topic = conversation_context['current_topic']
-        if current_topic.get('type') == 'lab_result':
+        logger.debug(f"Current topic: {current_topic}")
+        logger.debug(f"Current topic type: {type(current_topic)}")
+        if isinstance(current_topic, dict):
+            logger.debug(f"Topic name: {current_topic.get('name')}")
+            logger.debug(f"Topic type: {current_topic.get('type')}")
+        
+        # Map the current topic type to the appropriate intent
+        topic_type = current_topic.get('type', '')
+        logger.debug(f"Topic type: {topic_type}")
+        
+        # Handle different types of follow-up questions based on the current topic
+        if topic_type == 'lab_result' or topic_type == 'lab_results' or topic_type == 'lab_results_query':
             logger.info("Anaphora resolution: Lab result context detected in conversation context.")
+            logger.debug("Identified as lab result follow-up")
             return {
                 "intent": Intent.LAB_RESULTS_QUERY.value,
                 "confidence": 0.9,
@@ -379,9 +451,83 @@ async def detect_intent(
                              "original_text": user_input, "reference_range": current_topic.get('reference_range'),
                              "last_value": current_topic.get('last_value'), "context_type": "anaphora_resolution"}
             }
+        elif topic_type == 'symptom_report' or topic_type == 'symptoms':
+            logger.info("Anaphora resolution: Symptom context detected in conversation context.")
+            logger.debug("Identified as symptom follow-up")
+            return {
+                "intent": Intent.SYMPTOM_REPORT.value,
+                "confidence": 0.9,
+                "entities": {"action": "followup", "topic": current_topic.get('name'),
+                             "original_text": user_input, "context_type": "anaphora_resolution"}
+            }
+        elif topic_type == 'medication' or topic_type == 'medications':
+            logger.info("Anaphora resolution: Medication context detected in conversation context.")
+            print("DEBUG-INTENT-FOLLOWUP-8: Identified as medication follow-up")
+            return {
+                "intent": Intent.MEDICAL_INFO_QUERY.value,
+                "confidence": 0.9,
+                "entities": {"action": "followup", "topic": current_topic.get('name'),
+                             "original_text": user_input, "context_type": "anaphora_resolution"}
+            }
+        elif topic_type == 'appointment' or topic_type == 'scheduling':
+            logger.info("Anaphora resolution: Appointment context detected in conversation context.")
+            print("DEBUG-INTENT-FOLLOWUP-9: Identified as appointment follow-up")
+            return {
+                "intent": Intent.SHOW_APPOINTMENTS.value, 
+                "confidence": 0.9,
+                "entities": {"action": "followup", "topic": current_topic.get('name'),
+                             "original_text": user_input, "context_type": "anaphora_resolution"}
+            }
+        else:
+            # General follow-up for other topics
+            logger.info(f"Anaphora resolution: General follow-up to topic {topic_type}")
+            logger.debug(f"General follow-up to topic {topic_type}")
+            # Default to medical info query for general follow-ups
+            return {
+                "intent": Intent.MEDICAL_INFO_QUERY.value,
+                "confidence": 0.9,
+                "entities": {"action": "followup", "topic": current_topic.get('name', 'general'),
+                             "original_text": user_input, "context_type": "anaphora_resolution"}
+            }
 
     # 2.6 Additional AI-based short query check for very short messages (<= 5 words)
     if len(original_message.split()) <= 5:
+        logger.debug(f"Detected short query: {original_message}")
+        # If we have a current topic, this is likely a follow-up
+        if conversation_context and conversation_context.get('current_topic'):
+            current_topic = conversation_context.get('current_topic', {})
+            logger.debug(f"Short query with current topic: {current_topic}")
+            
+            # If the message is really short (1-2 words) and doesn't contain a question mark,
+            # it's very likely a follow-up to the current topic
+            if len(original_message.split()) <= 2 and '?' not in original_message:
+                topic_type = current_topic.get('type', '')
+                topic_name = current_topic.get('name', '')
+                print(f"DEBUG-SHORT-QUERY-3: Very short query detected, treating as direct follow-up to {topic_type}")
+                
+                # Map to appropriate intent based on current topic
+                if topic_type in ['lab_result', 'lab_results', 'lab_results_query']:
+                    return {
+                        "intent": Intent.LAB_RESULTS_QUERY.value,
+                        "confidence": 0.95,
+                        "entities": {"action": "followup", "topic": topic_name, "original_text": user_input, 
+                                    "context_type": "short_query"}
+                    }
+                elif topic_type in ['symptom_report', 'symptoms']:
+                    return {
+                        "intent": Intent.SYMPTOM_REPORT.value,
+                        "confidence": 0.95,
+                        "entities": {"action": "followup", "topic": topic_name, "original_text": user_input, 
+                                    "context_type": "short_query"}
+                    }
+                elif topic_type in ['medication', 'medications']:
+                    return {
+                        "intent": Intent.MEDICAL_INFO_QUERY.value,
+                        "confidence": 0.95,
+                        "entities": {"action": "followup", "topic": topic_name, "original_text": user_input, 
+                                    "context_type": "short_query"}
+                    }
+        
         context_prompt = f"\nPrevious topic: {conversation_context['current_topic'].get('name')}" if conversation_context and conversation_context.get('current_topic') else ""
         cache_key = f"short_query::{original_message}{context_prompt}"
         if cache_key in FALLBACK_CACHE:
@@ -406,7 +552,7 @@ async def detect_intent(
                 temperature=0.1
             )
             if isinstance(response, Coroutine):
-                print("DEBUG: GPT response is a coroutine, forcing await.")
+                logger.debug("GPT response is a coroutine, forcing await.")
                 response = await response
             analysis = json.loads(response.choices[0].message.content)
             if analysis.get('is_followup') is True and analysis.get('confidence', 0) > 0.7:
@@ -455,13 +601,24 @@ async def detect_intent(
                 "entities": {"action": "query", "topic": original_message, "original_text": user_input}
             }
 
-    # 2.8 Screening Patterns
+    # 2.8 Screening Patterns - check for sleep questions first and redirect them
+    # Check if message is about sleep (redirect to medical_info_query instead)
+    sleep_pattern = re.compile(r'sleep|rest|tired|insomnia|how\s+much\s+sleep|hours\s+of\s+sleep', re.IGNORECASE)
+    if sleep_pattern.search(original_message):
+        logger.info("Sleep question detected, routing to medical_info_query.")
+        return {
+            "intent": Intent.MEDICAL_INFO_QUERY.value, 
+            "confidence": 0.95,
+            "entities": {"topic": "sleep health", "original_text": user_input}
+        }
+        
+    # Only match screening patterns if they're truly about screening reminders
     if any(pattern.search(original_message) for pattern in COMPILED_SCREENING_PATTERNS):
         logger.info("Regex detection: Screening pattern matched.")
         return {
             "intent": Intent.SCREENING.value,
             "confidence": 0.9,
-            "entities": {"action": "recommend", "original_text": user_input}
+            "entities": {"action": "respond", "original_text": user_input}
         }
 
     # 2.9 Medical Record Patterns
@@ -527,6 +684,7 @@ You are a powerful medical chatbot assistant. Classify the user's intent from th
 - medical_record_query
 - medical_info_query
 - symptom_report
+- issue_report
 - lab_results
 - lab_results_query
 - capabilities
@@ -539,6 +697,15 @@ You are a powerful medical chatbot assistant. Classify the user's intent from th
 - mental_health_query
 - screening
 - unknown
+
+IMPORTANT: Use 'issue_report' for any health issue query that describes a symptom, problem or condition the user is experiencing, especially when they're looking for advice on what to do.
+
+Examples:
+- "I've been having trouble sleeping" → issue_report
+- "My back has been hurting for days" → issue_report
+- "I have a persistent cough that won't go away" → issue_report
+- "I'm experiencing ringing in my ears" → issue_report
+- "My vision has been blurry" → issue_report
 
 Return strict JSON:
 {
@@ -586,7 +753,16 @@ Return strict JSON:
         {"role": "assistant", "content": '{"intent": "symptom_report", "confidence": 0.95, "entities": {"symptom_category": "general"}}'},
 
         {"role": "user", "content": "What screenings should I get?"},
-        {"role": "assistant", "content": '{"intent": "screening", "confidence": 0.9, "entities": {"action": "recommend"}}'}
+        {"role": "assistant", "content": '{"intent": "screening", "confidence": 0.9, "entities": {"action": "recommend"}}'},
+        
+        {"role": "user", "content": "I've been having trouble sleeping for a few weeks now"},
+        {"role": "assistant", "content": '{"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "I\'ve been having trouble sleeping for a few weeks now"}}'},
+        
+        {"role": "user", "content": "My back has been hurting for days"},
+        {"role": "assistant", "content": '{"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "My back has been hurting for days"}}'},
+        
+        {"role": "user", "content": "I'm experiencing ringing in my ears"},
+        {"role": "assistant", "content": '{"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "I\'m experiencing ringing in my ears"}}'}
     ]
     cache_key = f"gpt_fallback::{original_message}::{json.dumps(context_info)}::{last_intent}"
     if cache_key in FALLBACK_CACHE:
@@ -601,7 +777,7 @@ Return strict JSON:
             max_tokens=150
         )
         if isinstance(response, Coroutine):
-            print("DEBUG: GPT response is a coroutine, forcing await.")
+            logger.debug("GPT response is a coroutine, forcing await.")
             response = await response
         if not response or not response.choices:
             logger.error("Empty response from OpenAI fallback.")
@@ -732,4 +908,4 @@ Return JSON with:
             "For your safety, please seek medical attention or contact emergency services "
             "if you're concerned about any symptoms."
         )
-print ("24")
+logger.debug("Intent service initialization complete")

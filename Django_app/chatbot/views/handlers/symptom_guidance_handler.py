@@ -5,8 +5,9 @@ from django.http import JsonResponse
 import logging
 from ..services.symptom_guidance_service import SymptomGuidanceService
 from asgiref.sync import sync_to_async
-print ("20")
+
 logger = logging.getLogger('chatbot')
+logger.debug("Symptom guidance handler initialized")
 
 class SymptomGuidanceHandler:
     def __init__(self, session, user_message, user_id):
@@ -98,7 +99,6 @@ class SymptomGuidanceHandler:
             interaction_log = {
                 'timestamp': datetime.utcnow().isoformat(),
                 'patient_id': self.patient_id,
-                'original_message': self.user_message,
                 'symptom_analysis': analysis,
                 'risk_assessment': assessment,
                 'response_given': response,
@@ -107,6 +107,22 @@ class SymptomGuidanceHandler:
             
             await sync_to_async(logger.info)(f"Symptom guidance interaction logged: {json.dumps(interaction_log)}")
             
+            # Add to audit trail using the audit module
+            from audit.utils import log_event
+            
+            # Extract risk level for audit metadata
+            risk_level = assessment.get('level', 'UNKNOWN') if assessment else 'UNKNOWN'
+            
+            await sync_to_async(log_event)(
+                actor=self.user_id,
+                action="symptom.guidance",
+                resource=f"Patient/{self.patient_id}" if self.patient_id else "unknown_patient",
+                meta={
+                    "risk_level": risk_level,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+            
         except Exception as e:
             await sync_to_async(logger.error)(f"Error logging guidance interaction: {str(e)}")
-print ("21")
+logger.debug("Symptom guidance handler initialization complete")

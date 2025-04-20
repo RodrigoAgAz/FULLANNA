@@ -3,11 +3,14 @@ import logging
 import json
 from langdetect import detect, DetectorFactory
 from django.conf import settings
+from django.core.cache import cache  # Redis cache backend
 from openai import AsyncOpenAI  # Changed to AsyncOpenAI
 import re
 from ..utils.constants import OPENAI_MODEL
-print ("25")
+import hashlib
+
 logger = logging.getLogger('chatbot')
+logger.debug("Language service initialized")
 
 class LanguageService:
     def __init__(self):
@@ -53,12 +56,62 @@ class LanguageService:
         return messages.get(message_key, {}).get(lang_code, messages[message_key]['en'])
     
     async def translate_text(self, text, target_lang='en'):
-        """Translate text using OpenAI"""
+        """
+        Translate text using OpenAI with Redis caching
+        
+        Uses a hash of the text and target language as the cache key.
+        Caches translations for 90 days to reduce API costs.
+        """
         if not text or target_lang == 'en':
             return text
+            
+        # Generate a cache key based on the text and target language
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        cache_key = f"trans:{target_lang}:{text_hash}"
+        
+        # Check cache first
+        cached_translation = cache.get(cache_key)
+        if cached_translation:
+            logger.info(f"Using cached translation for {target_lang} (key: {cache_key[:10]}...)")
+            return cached_translation
 
         try:
-            response = await self.openai_client.chat.completions.create(  # Added await
+            # No cache hit, call the OpenAI API
+            logger.info(f"Translation cache miss - calling API for {target_lang} text (key: {cache_key[:10]}...)")
+            response = await self.openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": f"You are a translator. Translate the following text to {self.supported_languages[target_lang]['name']}, maintaining the same tone and meaning:"},
+                    {"role": "user", "content": text}
+                ],
+                temperature=0.3
+            )
+            translation = response.choices[0].message.content.strip()
+            
+            # Cache the result for 90 days (60*60*24*90 = 7,776,000 seconds)
+            cache.set(cache_key, translation, 60*60*24*90)
+            
+            # Audit the translation (but not the content for privacy)
+            from audit.utils import log_event
+            log_event(
+                actor="system", 
+                action="translation.new",
+                resource=f"language.{target_lang}",
+                meta={"chars": len(text), "cache_key": cache_key}
+            )
+            
+            return translation
+        except Exception as e:
+            logger.error(f"Translation error: {str(e)}")
+            return text
+            
+    async def _gpt_translate(self, text, target_lang):
+        """
+        Internal method to perform the actual OpenAI translation
+        Used by the cached translate_text method
+        """
+        try:
+            response = await self.openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": f"You are a translator. Translate the following text to {self.supported_languages[target_lang]['name']}, maintaining the same tone and meaning:"},
@@ -68,7 +121,7 @@ class LanguageService:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            logger.error(f"Translation error: {str(e)}")
+            logger.error(f"GPT translation error: {str(e)}")
             return text
 
 class LanguageHandler:
@@ -133,4 +186,4 @@ class LanguageHandler:
           logger.error(f"Error translating to English: {str(e)}")
           return text
             
-print ("26")
+logger.debug("Language service initialization complete")

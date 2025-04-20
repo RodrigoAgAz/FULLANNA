@@ -1,0 +1,55 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+enviro/
+
+# Debug files
+debug_init.py
+chatbot/views/handlers/debug_utils.py
+custom_asgi.py
+
+# Data and logs
+*.log
+*.sqlite3
+data/hapi/database.*
+celerybeat-schedule.db
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git files
+.git
+.gitignore
+
+# Docker files (to prevent duplication)
+Dockerfile
+.dockerignore
+
+# Tests
+test_*.py

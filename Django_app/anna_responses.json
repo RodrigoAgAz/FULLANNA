@@ -1,0 +1,62 @@
+[
+  {
+    "query": "What are the symptoms of diabetes?",
+    "response": [
+      "Welcome to ANNA! To help you access your medical information, please provide your phone number."
+    ]
+  },
+  {
+    "query": "How do I know if I have high blood pressure?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "Can stress cause headaches?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "What's the difference between a cold and the flu?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "Is it normal to feel tired all the time?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "What should I do for a sprained ankle?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "Can you explain what cholesterol is?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "Should I be worried about chest pain?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "What foods are good for heart health?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  },
+  {
+    "query": "How much sleep do I need each night?",
+    "response": [
+      "That doesn't look like a valid phone number. Please enter your phone number (e.g., 1234567890)."
+    ]
+  }
+]
