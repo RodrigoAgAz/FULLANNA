@@ -41,7 +41,7 @@ MIDDLEWARE = [
     'chatbot.middleware.twilio_signature.TwilioSignatureMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'chatbot.middleware.CustomCsrfMiddleware',  # Replace the default CSRF middleware
+    #'chatbot.middleware.CustomCsrfMiddleware',  # Replace the default CSRF middleware
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -81,7 +81,8 @@ DATABASES = {
 
 
 # Redis configuration
-REDIS_URL = os.getenv('REDIS_URL', 'redis://redis:6379/0')
+# Use localhost for local development, 'redis' service name for Docker/containerized environments
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 # Parse REDIS_URL for backwards compatibility
 REDIS_HOST = os.getenv('REDIS_HOST', REDIS_URL.split('@')[-1].split(':')[0] if '@' in REDIS_URL else REDIS_URL.split('//')[1].split(':')[0])
 REDIS_PORT = int(os.getenv('REDIS_PORT', REDIS_URL.split(':')[-1].split('/')[0]))

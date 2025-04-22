@@ -8,7 +8,7 @@ class TwilioSignatureMiddleware:
         self.token = settings.TWILIO_AUTH_TOKEN
 
     def __call__(self, request):
-        if request.path.startswith("/chatbot/"):
+        if request.path == "/webhooks/sms/":
             tw_sig = request.headers.get("X-Twilio-Signature")
             if not self._valid(request, tw_sig):
                 return HttpResponseForbidden("Invalid Twilio signature")
