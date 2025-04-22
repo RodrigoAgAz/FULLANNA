@@ -1106,14 +1106,23 @@ IMPORTANT: End with a disclaimer about this being educational not professional m
                     # Create a new client as fallback
                     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
                 
-                response = await client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
+                # Debug log for message processing
+                print("USER TEXT:", message)
+                
+                # Create the GPT payload
+                gpt_payload = {
+                    "model": "gpt-4o-mini",
+                    "messages": [
                         {"role": "system", "content": "You are a helpful medical advisor providing accurate, concise advice."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.3  # Lower temperature for more factual responses
-                )
+                    "temperature": 0.3  # Lower temperature for more factual responses
+                }
+                
+                # Debug log for the GPT payload
+                print("GPT INPUT:", gpt_payload)
+                
+                response = await client.chat.completions.create(**gpt_payload)
                 
                 advice = response.choices[0].message.content.strip()
                 
@@ -1510,9 +1519,13 @@ IMPORTANT: End with a disclaimer about this being educational not professional m
         Uses GPT for high-quality entity extraction.
         """
         try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
+            # Debug log for symptom extraction
+            print("USER TEXT:", symptom_description)
+            
+            # Create the GPT payload
+            gpt_payload = {
+                "model": "gpt-4o-mini",
+                "messages": [
                     {"role": "system", "content": """You are a medical NLP expert that extracts key medical terms.
                     Extract the main health issue/symptom from the user's message as a simple noun phrase.
                     Return a JSON object with the following structure:
@@ -1526,9 +1539,14 @@ IMPORTANT: End with a disclaimer about this being educational not professional m
                     
                     Return only the JSON object with the keyphrase and normalized term."""}
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.1
-            )
+                "response_format": {"type": "json_object"},
+                "temperature": 0.1
+            }
+            
+            # Debug log for the GPT payload
+            print("GPT INPUT:", gpt_payload)
+            
+            response = await self.openai_client.chat.completions.create(**gpt_payload)
             
             # Parse the response
             result = json.loads(response.choices[0].message.content)
