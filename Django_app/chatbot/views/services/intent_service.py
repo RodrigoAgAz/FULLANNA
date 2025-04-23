@@ -677,6 +677,7 @@ async def detect_intent(
         }
 
     # --- 3. GPT Fallback ---
+    # Add examples to the system prompt instead of as separate messages
     fallback_prompt = """
 You are a powerful medical chatbot assistant. Classify the user's intent from this list:
 - set_appointment
@@ -707,6 +708,53 @@ Examples:
 - "I'm experiencing ringing in my ears" → issue_report
 - "My vision has been blurry" → issue_report
 
+Here are more examples with their expected classifications:
+
+User: "i want to set an appointment"
+Expected response: {"intent": "set_appointment", "confidence": 0.95, "entities": {}}
+
+User: "I need to schedule a check-up"
+Expected response: {"intent": "set_appointment", "confidence": 0.95, "entities": {}}
+
+User: "What are my upcoming appointments?"
+Expected response: {"intent": "show_appointments", "confidence": 0.9, "entities": {}}
+
+User: "What was my potassium level on my last lab test?"
+Expected response: {"intent": "lab_results_query", "confidence": 0.85, "entities": {"test_name": "potassium"}}
+
+User: "Can you show me my allergies?"
+Expected response: {"intent": "medical_record_query", "confidence": 0.9, "entities": {"record_type": "allergies"}}
+
+User: "hello"
+Expected response: {"intent": "greeting", "confidence": 1.0, "entities": {}}
+
+User: "I feel depressed and can't sleep"
+Expected response: {"intent": "mental_health_query", "confidence": 0.9, "entities": {"topic": "mental_health"}}
+
+User: "I want to see my lab results from last month"
+Expected response: {"intent": "lab_results_query", "confidence": 0.9, "entities": {"action": "query"}}
+
+User: "Let's delete context now"
+Expected response: {"intent": "delete_context", "confidence": 1.0, "entities": {"action": "delete"}}
+
+User: "I have a headache and a fever"
+Expected response: {"intent": "symptom_report", "confidence": 0.95, "entities": {"symptom_category": "general"}}
+
+User: "What screenings should I get?"
+Expected response: {"intent": "screening", "confidence": 0.9, "entities": {"action": "recommend"}}
+
+User: "I've been having trouble sleeping for a few weeks now"
+Expected response: {"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "I've been having trouble sleeping for a few weeks now"}}
+
+User: "My back has been hurting for days"
+Expected response: {"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "My back has been hurting for days"}}
+
+User: "Why do I need a colonoscopy?"
+Expected response: {"intent": "explanation_query", "confidence": 0.95, "entities": {"topic": "colonoscopy"}}
+
+User: "What can you help me with?"
+Expected response: {"intent": "capabilities", "confidence": 1.0, "entities": {}}
+
 Return strict JSON:
 {
   "intent": "<one of the above>",
@@ -717,52 +765,7 @@ Return strict JSON:
     context_info = conversation_context if conversation_context else {}
     gpt_messages = [
         {"role": "system", "content": fallback_prompt},
-        {"role": "user", "content": f"Utterance: {user_input}\nContext: {json.dumps(context_info)}\nLast Intent: {last_intent}"},
-
-        # Few-shot examples:
-        {"role": "assistant", "content": '{"intent": "set_appointment", "confidence": 0.95, "entities": {}}'},
-        {"role": "user", "content": "i want to set an appointment"},
-        {"role": "assistant", "content": '{"intent": "set_appointment", "confidence": 0.95, "entities": {}}'},
-
-        {"role": "assistant", "content": '{"intent": "set_appointment", "confidence": 0.95, "entities": {}}'},
-        {"role": "user", "content": "I need to schedule a check-up"},
-        {"role": "assistant", "content": '{"intent": "set_appointment", "confidence": 0.95, "entities": {}}'},
-
-        {"role": "user", "content": "What are my upcoming appointments?"},
-        {"role": "assistant", "content": '{"intent": "show_appointments", "confidence": 0.9, "entities": {}}'},
-
-        {"role": "user", "content": "What was my potassium level on my last lab test?"},
-        {"role": "assistant", "content": '{"intent": "lab_results_query", "confidence": 0.85, "entities": {"test_name": "potassium"}}'},
-
-        {"role": "user", "content": "Can you show me my allergies?"},
-        {"role": "assistant", "content": '{"intent": "medical_record_query", "confidence": 0.9, "entities": {"record_type": "allergies"}}'},
-
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": '{"intent": "greeting", "confidence": 1.0, "entities": {}}'},
-
-        {"role": "user", "content": "I feel depressed and can't sleep"},
-        {"role": "assistant", "content": '{"intent": "mental_health_query", "confidence": 0.9, "entities": {"topic": "mental_health"}}'},
-
-        {"role": "user", "content": "I want to see my lab results from last month"},
-        {"role": "assistant", "content": '{"intent": "lab_results_query", "confidence": 0.9, "entities": {"action": "query"}}'},
-
-        {"role": "user", "content": "Let's delete context now"},
-        {"role": "assistant", "content": '{"intent": "delete_context", "confidence": 1.0, "entities": {"action": "delete"}}'},
-
-        {"role": "user", "content": "I have a headache and a fever"},
-        {"role": "assistant", "content": '{"intent": "symptom_report", "confidence": 0.95, "entities": {"symptom_category": "general"}}'},
-
-        {"role": "user", "content": "What screenings should I get?"},
-        {"role": "assistant", "content": '{"intent": "screening", "confidence": 0.9, "entities": {"action": "recommend"}}'},
-        
-        {"role": "user", "content": "I've been having trouble sleeping for a few weeks now"},
-        {"role": "assistant", "content": '{"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "I\'ve been having trouble sleeping for a few weeks now"}}'},
-        
-        {"role": "user", "content": "My back has been hurting for days"},
-        {"role": "assistant", "content": '{"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "My back has been hurting for days"}}'},
-        
-        {"role": "user", "content": "I'm experiencing ringing in my ears"},
-        {"role": "assistant", "content": '{"intent": "issue_report", "confidence": 0.95, "entities": {"symptom_description": "I\'m experiencing ringing in my ears"}}'}
+        {"role": "user", "content": f"Utterance: {user_input}\nContext: {json.dumps(context_info)}\nLast Intent: {last_intent}"}
     ]
     cache_key = f"gpt_fallback::{original_message}::{json.dumps(context_info)}::{last_intent}"
     if cache_key in FALLBACK_CACHE:

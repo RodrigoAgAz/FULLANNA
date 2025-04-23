@@ -116,6 +116,7 @@ class ChatHandler:
             # Medical-related intents - all routed through central medical query handler
             'medical_info_query': self._handle_medical_query,
             'symptom_report': self._handle_medical_query,
+            'issue_report': self._handle_medical_query,  # Added missing handler for issue_report
             'symptoms': self._handle_medical_query,
             'conditions': self._handle_medical_query,
             'medications': self._handle_medical_query,
