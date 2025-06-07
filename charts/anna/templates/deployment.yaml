@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anna.fullname" . }}
+  labels:
+    {{- include "anna.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "anna.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "anna.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "anna.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz/
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz/
+              port: http
+          env:
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: REDIS_DB
+              value: {{ .Values.redis.db | quote }}
+            - name: DEBUG
+              value: "False"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "anna.fullname" . }}
+                  key: openai-api-key
+            - name: SENTRY_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "anna.fullname" . }}
+                  key: sentry-dsn
+            - name: TWILIO_ACCOUNT_SID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "anna.fullname" . }}
+                  key: twilio-account-sid
+            - name: TWILIO_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "anna.fullname" . }}
+                  key: twilio-auth-token
+            - name: TWILIO_PHONE_NUMBER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "anna.fullname" . }}
+                  key: twilio-phone-number
+            - name: FHIR_SERVER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "anna.fullname" . }}
+                  key: fhir-server-url
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "anna.fullname" . }}
+                  key: django-secret-key
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

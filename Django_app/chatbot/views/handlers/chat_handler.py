@@ -7,13 +7,13 @@ import re
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 from asgiref.sync import sync_to_async
+from ..utils.async_helpers import ensure_async, safe_await
 # Django imports
 from django.conf import settings
 from django.http import JsonResponse
 # Third-party imports
 from openai import AsyncOpenAI
 from twilio.rest import Client
-from chatbot.views.services.fhir_service import FHIRService
 from fhirclient.models.observation import Observation
 from fhirclient.models.diagnosticreport import DiagnosticReport
 from chatbot.views.config import config as app_config
@@ -36,7 +36,10 @@ from chatbot.views.handlers.medical_handler import (
     get_complete_medical_record,
 )
 from chatbot.views.services.fhir_service import (
+    fhir_service,  # Import the singleton instance instead of the class
     get_available_practitioners,
+    get_user_appointments, 
+    get_practitioner
 )
 from chatbot.views.services.scheduler import search_available_slots, get_patient_appointments
 
@@ -45,9 +48,8 @@ from fhirclient.models.patient import Patient
 from fhirclient.models.immunization import Immunization
 from fhirclient.models.bundle import Bundle
 from fhirclient.server import FHIRServer
-# Removed debug utils imports that were causing issues
 
-from .context_manager import ContextManager  # Import the ContextManager
+from .context_manager_simple import context_manager
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +69,8 @@ class ChatHandler:
         # Log the user_id for debugging purposes
         logger.debug(f"ChatHandler initialized for user_id: {self.user_id}")
 
-        # Initialize FHIR service using your existing FHIRService class
-        self.fhir_service = FHIRService()
+        # Initialize FHIR service using the singleton instance
+        self.fhir_service = fhir_service  # Use the singleton instance
         self.fhir_client = self.fhir_service  # Use fhir_service for all FHIR operations
 
         # Extract patient data from session if available
@@ -98,18 +100,19 @@ class ChatHandler:
         
         # Initialize conversation_context before updating it
         self.conversation_context = None
-        # Import ContextManager here to avoid circular imports
-        from .context_manager import ContextManager
         if session_data and 'conversation_context' in session_data:
             # Create a new ContextManager or initialize to empty object that can handle __dict__.update
             self.conversation_context = ContextManager(self.user_id, session_data, None)
             self.conversation_context.__dict__.update(session_data['conversation_context'])
 
-        # Import the medical advice service
-        from chatbot.views.services.personalized_medical_advice_service import PersonalizedMedicalAdviceService
-        
         # Initialize the medical advice service
         self.medical_advice_service = PersonalizedMedicalAdviceService()
+        
+        # Import the explanation service for handling educational queries
+        from chatbot.views.services.explanation_service import explanation_service
+        
+        # Store the singleton instance
+        self.explanation_service = explanation_service
         
         # Register intent handlers.  This is the CRITICAL part.
         self.intent_handlers = {
@@ -124,9 +127,11 @@ class ChatHandler:
             'vaccines': self._handle_medical_query,
             'lab_results': self._handle_medical_query,
             'lab_results_query': self._handle_medical_query,
-            'screening': self._handle_medical_query,
             'height': self._handle_medical_query,
             'explanation_query': self._handle_medical_query,
+            
+            # Use the dedicated screening handler for screening intent
+            'screening': self._handle_screening,
  
             # Non-medical intents remain unchanged
             'medical_record': self._handle_medical_record,
@@ -183,10 +188,7 @@ class ChatHandler:
                 if 'conversation_history' not in self.session:
                     self.session['conversation_history'] = []
                 
-                # Ensure ContextManager is imported properly - redundant with the import at the top
-                # but keeps consistency with the except block pattern
-                from chatbot.views.handlers.context_manager import ContextManager
-                
+                # Initialize context manager
                 self.context_manager = ContextManager(
                     user_id=self.user_id,
                     session=self.session, 
@@ -196,9 +198,7 @@ class ChatHandler:
             except Exception as context_error:
                 logger.error(f"Error initializing context manager: {str(context_error)}", exc_info=True)
                 # Create a fallback minimal context manager
-                # We must import context_manager here to handle the case where the top-level import failed
                 try:
-                    from chatbot.views.handlers.context_manager import ContextManager
                     self.context_manager = ContextManager(
                         user_id=str(id(self.session)),  # Generate a unique ID as fallback
                         session={'conversation_history': []}, 
@@ -265,6 +265,48 @@ class ChatHandler:
             logger.error(f"Error in async initialization: {str(e)}", exc_info=True)
             raise
             logger.debug("(initialisation finished)")
+
+    def _get_patient_name(self):
+        """Extract patient's name from session data"""
+        if not self.patient or not self.patient.get('resource'):
+            return "there"  # Fallback
+        
+        patient_resource = self.patient['resource']
+        name_data = patient_resource.get('name', [])
+        
+        if not name_data:
+            return "there"
+        
+        # Get the first name entry
+        name_obj = name_data[0] if isinstance(name_data, list) else name_data
+        
+        if isinstance(name_obj, dict):
+            # Try to get given name (first name)
+            given_names = name_obj.get('given', [])
+            if given_names:
+                return given_names[0]  # Return first given name
+            
+            # Fallback to family name if no given name
+            family_name = name_obj.get('family')
+            if family_name:
+                return family_name
+        
+        return "there"  # Final fallback
+
+    async def _handle_greeting(self, message=None, intent_data=None):
+        """Handle greeting messages with personalized response"""
+        try:
+            patient_name = self._get_patient_name()
+            
+            if patient_name != "there":
+                greeting = f"Hello {patient_name.title()}! How can I help you today?"
+            else:
+                greeting = "Hello! How can I help you today?"
+                
+            return JsonResponse({"messages": [greeting]}), self.session
+        except Exception as e:
+            logger.error(f"Error in greeting: {str(e)}")
+            return JsonResponse({"messages": ["Hello! How can I help you today?"]}), self.session
 
     async def handle_message(self, message=None, **kwargs):
         """Main message handling method, now with extensive debugging."""
@@ -481,11 +523,7 @@ class ChatHandler:
                 logger.debug(f"Booking flow returned response type: {type(response).__name__}")
                 logger.debug(f"Type of response in handle_message after booking flow: {type(response)}")
                 
-                # Check for unawaited coroutine
-                if inspect.iscoroutine(response):
-                    logger.error(f"CRITICAL ERROR: Got unawaited coroutine {response}")
-                    logger.error(f"Attempting to await the coroutine")
-                    response = await response  # Try to fix it
+                response = await safe_await(response)
                 
                 print(f"Final response type: {type(response)}")
                 print(f"Is coroutine: {inspect.iscoroutine(response)}")
@@ -500,10 +538,7 @@ class ChatHandler:
                     response, self.session = await self._handle_reschedule_request()
                     
                     # Check for unawaited coroutine
-                    if inspect.iscoroutine(response):
-                        logger.error(f"CRITICAL ERROR: Got unawaited coroutine {response}")
-                        logger.error(f"Attempting to await the coroutine")
-                        response = await response  # Try to fix it
+                    response = await safe_await(response)
                     
                     return response, self.session
 
@@ -513,10 +548,7 @@ class ChatHandler:
                 logger.debug(f"Type of response in handle_message after booking flow: {type(response)}")
                 
                 # Check for unawaited coroutine
-                if inspect.iscoroutine(response):
-                    logger.error(f"CRITICAL ERROR: Got unawaited coroutine {response}")
-                    logger.error(f"Attempting to await the coroutine")
-                    response = await response  # Try to fix it
+                response = await safe_await(response)
                 
                 return response, self.session
 
@@ -530,10 +562,7 @@ class ChatHandler:
                 response, self.session = await self._handle_explanation_query(self.user_message)
                 
                 # Check for unawaited coroutine
-                if inspect.iscoroutine(response):
-                    logger.error(f"CRITICAL ERROR: Got unawaited coroutine {response}")
-                    logger.error(f"Attempting to await the coroutine")
-                    response = await response  # Try to fix it
+                response = await safe_await(response)
                 
                 return response, self.session
 
@@ -558,10 +587,7 @@ class ChatHandler:
                     response, self.session = await self._handle_capabilities_query()
                     
                     # Check for unawaited coroutine
-                    if inspect.iscoroutine(response):
-                        logger.error(f"CRITICAL ERROR: Got unawaited coroutine {response}")
-                        logger.error(f"Attempting to await the coroutine")
-                        response = await response  # Try to fix it
+                    response = await safe_await(response)
                     
                     return response, self.session
 
@@ -572,12 +598,9 @@ class ChatHandler:
                     appointments_response, self.session = await self._handle_show_appointments()
                     
                     # Check for unawaited coroutine
-                    if inspect.iscoroutine(appointments_response):
-                        logger.error(f"CRITICAL ERROR: Got unawaited coroutine {appointments_response}")
-                        logger.error(f"Attempting to await the coroutine")
-                        appointments_response = await appointments_response  # Try to fix it
+                    response = await safe_await(appointments_response)
                     
-                    return appointments_response, self.session
+                    return response, self.session
 
                 # Special handling for appointment booking initialization
                 elif primary_intent == 'appointment' and not self.session.get('booking_state'):
@@ -636,10 +659,7 @@ class ChatHandler:
                             logger.debug(f"Handler returned response of type: {type(response).__name__}")
                             
                             # Check for unawaited coroutine
-                            if inspect.iscoroutine(response):
-                                logger.error(f"CRITICAL ERROR: Got unawaited coroutine {response}")
-                                logger.error(f"Attempting to await the coroutine")
-                                response = await response  # Try to fix it
+                            response = await safe_await(response)
                             
                             print(f"Final response type: {type(response)}")
                             print(f"Is coroutine: {inspect.iscoroutine(response)}")
@@ -649,11 +669,7 @@ class ChatHandler:
                                 # Create a new tuple with awaited items if needed
                                 new_response = []
                                 for i, item in enumerate(response):
-                                    if inspect.iscoroutine(item):
-                                        logger.error(f"Tuple item {i} is a coroutine!")
-                                        new_response.append(await item)  # Await the coroutine
-                                    else:
-                                        new_response.append(item)
+                                    new_response.append(await safe_await(item))
                                 response = tuple(new_response)  # Create a new tuple
                                 
                                 logger.debug(f"Response is a tuple with {len(response)} items")
@@ -679,13 +695,7 @@ class ChatHandler:
             logger.debug(f"Creating final JsonResponse with {len(responses)} messages")
             
             # Final check for coroutines
-            if inspect.iscoroutine(responses):
-                logger.debug(f"Got unawaited coroutine {responses}")
-                logger.error(f"CRITICAL ERROR: Got unawaited coroutine {responses}")
-                logger.error(f"Attempting to await the coroutine")
-                logger.debug(f"Attempting to await the coroutine")
-                responses = await responses  # Try to fix it
-                logger.debug(f"Successfully awaited coroutine")
+            responses = await safe_await(responses)
             
             logger.debug(f"{type(responses)}")
             logger.debug(f"{inspect.iscoroutine(responses)}")
@@ -793,8 +803,8 @@ class ChatHandler:
 
             # Initialize new booking flow
             logger.debug("Initializing new booking flow")
-            # Get available practitioners using FHIRService
-            practitioners = await self.fhir_service.get_available_practitioners()
+            # Get available practitioners using imported function
+            practitioners = await get_available_practitioners()
 
             if not practitioners:
                 return JsonResponse({
@@ -1300,13 +1310,12 @@ class ChatHandler:
             # Save the session with all updates
             await update_session(self.user_id, self.session)
             
-            # Get patient name for greeting
-            name = patient.get('name', [{}])[0]
-            given_name = name.get('given', [''])[0] if name else ''
+            # Get patient name for personalized greeting
+            patient_name = self._get_patient_name()
             
             return JsonResponse({
                 "messages": [
-                    f"Thank you! I've found your records, {given_name}.",
+                    f"Thank you! I've found your records, {patient_name}.",
                     "How can I assist you with your healthcare today?"
                 ]
             }), self.session
@@ -1349,12 +1358,21 @@ class ChatHandler:
             appointments = await self.fhir_service.search("Appointment", appointment_params)
 
             if not appointments or 'entry' not in appointments or not appointments['entry']:
+                patient_name = self._get_patient_name()
+                if patient_name != "there":
+                    message = f"{patient_name.title()}, you don't have any upcoming appointments scheduled."
+                else:
+                    message = "You don't have any upcoming appointments scheduled."
                 return JsonResponse({
-                    "messages": ["You don't have any upcoming appointments scheduled."]
+                    "messages": [message]
                 }), self.session
 
             # Format appointments
-            messages = ["Here are your upcoming appointments:"]
+            patient_name = self._get_patient_name()
+            if patient_name != "there":
+                messages = [f"Here are your upcoming appointments, {patient_name.title()}:"]
+            else:
+                messages = ["Here are your upcoming appointments:"]
 
             for entry in appointments['entry']:
                 appointment = entry['resource']
@@ -1390,8 +1408,13 @@ class ChatHandler:
                 messages.append(appt_info)
 
             if len(messages) == 1:  # Only header message
+                patient_name = self._get_patient_name()
+                if patient_name != "there":
+                    message = f"{patient_name.title()}, you don't have any upcoming appointments scheduled."
+                else:
+                    message = "You don't have any upcoming appointments scheduled."
                 return JsonResponse({
-                    "messages": ["You don't have any upcoming appointments scheduled."]
+                    "messages": [message]
                 }), self.session
 
             return JsonResponse({
@@ -1400,8 +1423,13 @@ class ChatHandler:
 
         except Exception as e:
             logger.error(f"Error showing appointments: {str(e)}", exc_info=True)
+            patient_name = self._get_patient_name()
+            if patient_name != "there":
+                message = f"I'm sorry, I couldn't retrieve {patient_name.title()}'s appointments at this time. Please try again later."
+            else:
+                message = "I'm sorry, I couldn't retrieve your appointments at this time. Please try again later."
             return JsonResponse({
-                "messages": ["I'm sorry, I couldn't retrieve your appointments at this time. Please try again later."]
+                "messages": [message]
             }), self.session
 
     async def _handle_height_query(self):
@@ -1409,7 +1437,12 @@ class ChatHandler:
         try:
             logger.debug("Handling height query")
             if not self.patient or not self.patient.get('resource'):
-                return JsonResponse({"messages": ["I couldn't find your patient records."]}), self.session
+                patient_name = self._get_patient_name()
+                if patient_name != "there":
+                    message = f"I couldn't find {patient_name.title()}'s patient records."
+                else:
+                    message = "I couldn't find your patient records."
+                return JsonResponse({"messages": [message]}), self.session
 
             # Get height from patient resource extensions
             patient_resource = self.patient['resource']
@@ -1423,13 +1456,28 @@ class ChatHandler:
                 height_value = height_extension['valueQuantity']['value']
                 height_unit = height_extension['valueQuantity']['unit']
                 logger.debug(f"Found height: {height_value} {height_unit}")
-                return JsonResponse({"messages": [f"Your height is {height_value} {height_unit}."]}), self.session
+                patient_name = self._get_patient_name()
+                if patient_name != "there":
+                    message = f"{patient_name.title()}'s height is {height_value} {height_unit}."
+                else:
+                    message = f"Your height is {height_value} {height_unit}."
+                return JsonResponse({"messages": [message]}), self.session
 
-            return JsonResponse({"messages": ["I couldn't find your height information in your records."]}), self.session
+            patient_name = self._get_patient_name()
+            if patient_name != "there":
+                message = f"I couldn't find {patient_name.title()}'s height information in the records."
+            else:
+                message = "I couldn't find your height information in your records."
+            return JsonResponse({"messages": [message]}), self.session
 
         except Exception as e:
             logger.error(f"Error fetching height: {str(e)}", exc_info=True)
-            return JsonResponse({"messages": ["I'm sorry, I couldn't retrieve your height information at this time."]}), self.session
+            patient_name = self._get_patient_name()
+            if patient_name != "there":
+                message = f"I'm sorry, I couldn't retrieve {patient_name.title()}'s height information at this time."
+            else:
+                message = "I'm sorry, I couldn't retrieve your height information at this time."
+            return JsonResponse({"messages": [message]}), self.session
 
     async def _handle_greeting(self, message=None, intent_data=None):
         try:
@@ -1476,21 +1524,31 @@ class ChatHandler:
                     medications.append(f"- {name} ({dosage})")
 
             if medications:
-                formatted_meds = ['Your current medications are:']
+                patient_name = self._get_patient_name()
+                if patient_name != "there":
+                    formatted_meds = [f'{patient_name.title()}, your current medications are:']
+                else:
+                    formatted_meds = ['Your current medications are:']
                 formatted_meds.extend(medications)
                 await update_session(self.user_id, self.session)
                 return JsonResponse({"messages": formatted_meds}), self.session
 
             await update_session(self.user_id, self.session)
+            patient_name = self._get_patient_name()
             return JsonResponse({
-                "messages": ["I couldn't find any active medications in your records."]
+                "messages": [f"I couldn't find any active medications in {patient_name if patient_name != 'there' else 'your'} records."]
             }), self.session
 
         except Exception as e:
             logger.error(f"Error fetching medications: {str(e)}", exc_info=True)
             await update_session(self.user_id, self.session)
+            patient_name = self._get_patient_name()
+            if patient_name != "there":
+                message = f"I'm having trouble accessing {patient_name.title()}'s medication records right now."
+            else:
+                message = "I'm having trouble accessing your medication records right now."
             return JsonResponse({
-                "messages": ["I'm having trouble accessing your medication records right now."]
+                "messages": [message]
             }), self.session
 
     async def _handle_medical_record(self):
@@ -1501,8 +1559,13 @@ class ChatHandler:
         """Handle request to show complete medical record"""
         try:
             if not self.patient_id:
+                patient_name = self._get_patient_name()
+                if patient_name != "there":
+                    message = f"I couldn't access {patient_name.title()}'s medical records. Please ensure you're logged in."
+                else:
+                    message = "I couldn't access your medical records. Please ensure you're logged in."
                 return JsonResponse({
-                    "messages": ["I couldn't access your medical records. Please ensure you're logged in."]
+                    "messages": [message]
                 }), self.session
 
             # Initialize the record list
@@ -1511,9 +1574,26 @@ class ChatHandler:
 
             # Basic Information
             record.append("PERSONAL INFORMATION:")
-            name = patient_resource.get('name', [{}])[0]
-            full_name = f"{name.get('given', [''])[0]} {name.get('family', '')}"
-            record.append(f"Name: {full_name}")
+            patient_name = self._get_patient_name()
+            if patient_name != "there":
+                # Get full name for medical record
+                name_data = patient_resource.get('name', [{}])[0]
+                if isinstance(name_data, dict):
+                    given_names = name_data.get('given', [])
+                    family_name = name_data.get('family', '')
+                    if given_names and family_name:
+                        full_name = f"{' '.join(given_names)} {family_name}"
+                    elif given_names:
+                        full_name = ' '.join(given_names)
+                    elif family_name:
+                        full_name = family_name
+                    else:
+                        full_name = patient_name
+                else:
+                    full_name = patient_name
+                record.append(f"Name: {full_name}")
+            else:
+                record.append("Name: Not specified")
             record.append(f"Gender: {patient_resource.get('gender', 'Not specified')}")
             record.append(f"Birth Date: {patient_resource.get('birthDate', 'Not specified')}")
 
@@ -1788,7 +1868,7 @@ class ChatHandler:
                 "messages": ["I'm having trouble accessing your medical records right now."]
             }), self.session
 
-    async def _handle_initial_choice(self):
+    async def _handle_initial_choice(self, booking_state):
         """Handle initial choice for finding healthcare provider"""
         try:
             if self.user_message.lower() == 'cancel':
@@ -2026,8 +2106,8 @@ class ChatHandler:
 
             selected_role = roles[self.user_message]
 
-            # Get practitioners with the selected role
-            all_practitioners = await self.fhir_service.get_available_practitioners()
+            # Get practitioners with the selected role using imported function
+            all_practitioners = await get_available_practitioners()
             role_practitioners = [p for p in all_practitioners if p.get('role') == selected_role]
 
             if not role_practitioners:
@@ -2544,8 +2624,21 @@ class ChatHandler:
             intent = intent_data.get('intent')
             entities = intent_data.get('entities', {})
             
-            # Extract topic and symptom info from entities
-            topic = entities.get('topic', message)
+            # inside _handle_medical_query(), right after you read entities:
+            generic = {"general", "explanation", "followup", "unknown", ""}
+            nlu_topic = entities.get("topic", "").strip().lower()
+            
+            # if NLU gives only a generic placeholder, reuse the stored one
+            if nlu_topic in generic:
+                stored = self.session.get("current_topic", {}).get("name", "")
+                topic = stored or nlu_topic or message
+            else:
+                topic = nlu_topic or message
+            
+            # only write back if it's a real, non-generic topic
+            if topic and topic not in generic and hasattr(self, 'context_manager') and self.context_manager:
+                await self.context_manager.update_current_topic(topic)
+                
             symptom_description = entities.get('symptom_description', message)
             symptom_keyphrase = entities.get('symptom_keyphrase')
             
@@ -2629,8 +2722,79 @@ class ChatHandler:
                 await update_session(self.user_id, self.session)
                 logger.debug(f"Updated session with current_topic: {self.session.get('current_topic')}")
                 
-            # General medical questions and explanation queries
-            elif intent in ['medical_info_query', 'explanation_query']:
+            # Handle explanation queries (for medical procedures, tests, etc.) with dedicated service
+            elif intent == 'explanation_query':
+                # By this point, topic has already been resolved to use the most specific available value
+                # But let's log it for clarity                
+                logger.debug(f"Handling explanation_query with topic: {topic}")
+                
+                # Update the session with the current topic FIRST to ensure it persists even if service fails
+                self.session['current_topic'] = {
+                    'name': topic,
+                    'type': 'explanation',
+                    'last_updated': datetime.now().isoformat()
+                }
+                await update_session(self.user_id, self.session)
+                logger.debug(f"Updated session with explanation topic: {topic}")
+                
+                # Also update the context manager with this topic to ensure it persists
+                if hasattr(self, 'context_manager') and self.context_manager:
+                    await self.context_manager.update_current_topic(
+                        topic,
+                        {"source": "explanation_query"}
+                    )
+                
+                # 1) If it's an explanation follow-up ("should I get one?"),
+                # send it to the screening/recommendation logic instead of generic explainer.
+                action = entities.get("action", "")
+                is_followup = action == "followup" or entities.get("context_type") in ["anaphora_resolution", "short_query", "semantic_analysis"]
+                
+                is_screening_query = any(term in message.lower() for term in [
+                    "should i", "do i need", "is it necessary", "recommended", 
+                    "get one", "have one", "undergo", "when should"
+                ])
+                
+                is_screening_topic = any(procedure in topic.lower() for procedure in [
+                    "colonoscopy", "mammogram", "pap smear", "psa", "screening"
+                ])
+                
+                # For follow-ups about screenings, route to the personalized screening recommendation
+                if (is_followup or is_screening_query) and is_screening_topic:
+                    logger.info(f"Detected screening recommendation request for {topic}")
+                    
+                    # Get user age from patient data if available
+                    user_age = None
+                    if patient_data and isinstance(patient_data, dict) and 'birthDate' in patient_data:
+                        try:
+                            # Use the imported datetime module
+                            birth_date = datetime.fromisoformat(patient_data['birthDate'].replace('Z', '+00:00'))
+                            today = datetime.now()
+                            user_age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+                            logger.debug(f"Extracted user age: {user_age}")
+                        except Exception as e:
+                            logger.error(f"Error calculating age: {str(e)}")
+                    
+                    # Call the medical advice service for screening guidelines
+                    # Use patient_data parameter as it's defined in the method signature
+                    response_data = await self.medical_advice_service.get_screening_recommendation(
+                        patient_data=patient_data,
+                        screening_type=topic,
+                        user_age=user_age
+                    )
+                    logger.info(f"Got screening recommendation for {topic}")
+                    
+                # Otherwise (first question about a procedure), use the explanation service
+                else:
+                    # Call the explanation service to get an educational explanation
+                    # Log which topic we're passing to the explanation service
+                    logger.debug(f"Calling explanation_service.get_explanation with topic: {topic}")
+                    response_data = await self.explanation_service.get_explanation(
+                        topic=topic, 
+                        patient_data=patient_data
+                    )
+                
+            # General medical questions
+            elif intent == 'medical_info_query':
                 response_data = await self.medical_advice_service.handle_symptom_query(
                     message, 
                     patient_data,
@@ -2729,16 +2893,7 @@ class ChatHandler:
                     conversation_context=self.context_info
                 )
                 
-            # Patient-specific screening queries
-            elif intent == 'screening':
-                # For screening-related queries
-                response_data = await self.medical_advice_service.handle_symptom_query(
-                    message, 
-                    patient_data,
-                    topic="health screenings",
-                    conversation_context=self.context_info
-                )
-                
+            # Patient-specific screening queries are now handled by _handle_screening method
             # Patient-specific height queries
             elif intent == 'height':
                 height = None
@@ -2804,8 +2959,63 @@ class ChatHandler:
             }), self.session
     
     async def _handle_screening(self, message=None, intent_data=None):
-       """Placeholder for screening intent handler - now handled by _handle_medical_query."""
-       return await self._handle_medical_query(message, intent_data)
+        """
+        Handler for screening intent - provides personalized screening recommendations
+        based on patient age, risk factors, and evidence-based guidelines.
+        """
+        try:
+            if message is None:
+                message = self.user_message
+                
+            logger.debug(f"Processing screening query: {message}")
+            
+            # Get patient data from session if available
+            patient_data = self.patient.get('resource') if self.patient else None
+            entities = intent_data.get('entities', {})
+            
+            # Get the specific screening type from entities
+            screening_type = entities.get('topic', message)
+            logger.debug(f"Detected screening type: {screening_type}")
+            
+            # Update the session with the current topic
+            self.session['current_topic'] = {
+                'name': screening_type,
+                'type': 'screening',
+                'last_updated': datetime.now().isoformat()
+            }
+            await update_session(self.user_id, self.session)
+            
+            # Import the screening guideline service
+            from ..services.screening_guideline_service import ScreeningGuidelineService
+            guideline_service = ScreeningGuidelineService()
+            
+            # Get recommendation based on patient data and screening type
+            recommend, explanation = guideline_service.should_get_screening(
+                screening_type=screening_type,
+                patient_data=patient_data
+            )
+            
+            # Format the response
+            messages = [explanation]
+            
+            if recommend:
+                messages.insert(0, f"Yes – based on your age and risk factors, you should have a {screening_type} screening.")
+            else:
+                messages.insert(0, f"Based on current guidelines and your personal factors, routine {screening_type} screening is not currently recommended for you.")
+                
+            # Add standard disclaimer
+            messages.append("This information is for educational purposes only and is not a substitute for professional medical advice.")
+            
+            return JsonResponse({"messages": messages}), self.session
+            
+        except Exception as e:
+            logger.error(f"Error in screening handler: {str(e)}", exc_info=True)
+            return JsonResponse({
+                "messages": [
+                    "I apologize, but I encountered an error processing your request.",
+                    "If you have questions about medical screenings, please consult with your healthcare provider."
+                ]
+            }), self.session
 
     async def _parse_lab_query(self, query, context=None):
         """Parse lab query with improved date handling and context awareness"""

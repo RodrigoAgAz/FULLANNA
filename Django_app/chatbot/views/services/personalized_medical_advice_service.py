@@ -20,10 +20,9 @@ import asyncio
 from datetime import datetime
 from typing import List, Dict, Any
 import json
-import openai
-
 from django.conf import settings
 from chatbot.views.services.fhir_service import FHIRService
+from ...utils.openai_manager import openai_manager
 
 # Configure logging
 logger = logging.getLogger("PersonalizedMedicalAdvice")
@@ -190,19 +189,18 @@ async def summarize_messages(messages: List[str], openai_client: "AsyncGPT4Clien
 # Asynchronous GPT-4 Client Using OpenAI's Async API
 # ------------------------------------------------------------------------------
 class AsyncGPT4Client:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        from openai import AsyncOpenAI
-        self.client = AsyncOpenAI(api_key=api_key)
+    def __init__(self, api_key: str = None):
+        # Use centralized OpenAI manager instead
+        pass
 
     async def chat_completions_create(self, model: str, messages: List[dict],
                                      temperature: float = 0.7,
                                      max_tokens: int = 300) -> dict:
         """
-        Calls the OpenAI async ChatCompletion API.
+        Calls the OpenAI async ChatCompletion API via centralized manager.
         """
         try:
-            response = await self.client.chat.completions.create(
+            response = await openai_manager.chat_completion(
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -216,7 +214,7 @@ class AsyncGPT4Client:
     async def generate_advice(self, prompt: str) -> str:
         messages = [{"role": "user", "content": prompt}]
         response = await self.chat_completions_create(
-            model="gpt-4o-mini",  # Using the more recent model
+            model="gpt-4o-mini",
             messages=messages,
             temperature=0.7,
             max_tokens=300
@@ -250,10 +248,7 @@ class SymptomAnalyzer:
     """
     def __init__(self, openai_client=None):
         """Initialize with optional OpenAI client"""
-        from django.conf import settings
-        from openai import AsyncOpenAI
-        
-        self.openai_client = openai_client or AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        self.openai_client = openai_client
         self.fhir_service = FHIRService()
         
         # Define red flag symptoms
@@ -557,8 +552,16 @@ RESPONSE FORMAT: Return a JSON object with the following keys:
                 ]
 
             # Add local emergency numbers if available
-            if patient_data and isinstance(patient_data, dict) and 'address' in patient_data:
-                country = patient_data['address'][0].get('country', 'Unknown')
+            resource_data = None
+            
+            if patient_data and isinstance(patient_data, dict):
+                if 'resource' in patient_data and isinstance(patient_data['resource'], dict):
+                    resource_data = patient_data['resource']
+                else:
+                    resource_data = patient_data
+                    
+            if resource_data and isinstance(resource_data, dict) and 'address' in resource_data:
+                country = resource_data['address'][0].get('country', 'Unknown')
                 messages.append(f"\nLocal emergency numbers for {country}:")
                 if country == "Italy":
                     messages.append("Emergency: 112")
@@ -605,6 +608,29 @@ class PersonalizedMedicalAdviceService:
         
         # Create symptom analyzer and pass the OpenAI client
         self.symptom_analyzer = SymptomAnalyzer(openai_client=self.openai_client)
+        
+        # Screening guidelines by age
+        self.screening_guidelines = {
+            "colonoscopy": {
+                "min_age": 45,
+                "high_risk_factors": [
+                    "colorectal cancer", "colon cancer", "rectal cancer", "polyp", 
+                    "inflammatory bowel disease", "crohn", "ulcerative colitis",
+                    "lynch syndrome", "familial adenomatous polyposis"
+                ],
+                "frequency": "every 10 years if normal"
+            },
+            "mammogram": {
+                "min_age": 40,
+                "high_risk_factors": ["breast cancer", "brca", "dense breasts"],
+                "frequency": "annually"
+            },
+            "psa_screening": {
+                "min_age": 55,
+                "high_risk_factors": ["prostate cancer"],
+                "frequency": "discuss with doctor"
+            }
+        }
 
     async def get_personalized_advice(self, patient_id: str, user_query: str) -> str:
         """
@@ -657,6 +683,146 @@ class PersonalizedMedicalAdviceService:
         # No specific topic found
         return None
 
+    async def get_screening_recommendation(self, patient_data=None, screening_type=None, user_age=None):
+        """
+        Provides personalized recommendations for medical screenings based on 
+        patient age, risk factors, and evidence-based guidelines.
+        
+        Args:
+            patient_data: Patient data dictionary (optional)
+            screening_type: Type of screening to provide recommendation for (e.g., "colonoscopy")
+            user_age: Patient's age if known (optional, will extract from patient data if not provided)
+            
+        Returns:
+            Dict with personalized recommendation messages
+        """
+        try:
+            # Include the standard medical disclaimer
+            disclaimer = "This information is for educational purposes only and is not a substitute for professional medical advice."
+            
+            # Default responses for unknown screenings
+            if not screening_type or screening_type.lower() not in self.screening_guidelines:
+                return {
+                    "messages": [
+                        "I don't have specific screening guidelines for that procedure.",
+                        "Please consult with your healthcare provider for personalized recommendations.",
+                        disclaimer
+                    ]
+                }
+            
+            # Normalize screening type
+            screening_type = screening_type.lower()
+            for key in self.screening_guidelines:
+                if key in screening_type or screening_type in key:
+                    screening_type = key
+                    break
+            
+            # Get guidelines for this screening type
+            guidelines = self.screening_guidelines.get(screening_type)
+            if not guidelines:
+                return {
+                    "messages": [
+                        f"I don't have specific guidelines for {screening_type}.",
+                        "Please consult with your healthcare provider for personalized recommendations.",
+                        disclaimer
+                    ]
+                }
+            
+            # Extract patient age if not provided
+            age = user_age
+            if not age and patient_data and isinstance(patient_data, dict):
+                # Check if patient_data is a wrapped resource
+                resource_data = None
+                if 'resource' in patient_data and isinstance(patient_data['resource'], dict):
+                    resource_data = patient_data['resource']
+                else:
+                    resource_data = patient_data
+                
+                if 'birthDate' in resource_data:
+                    from datetime import datetime
+                    try:
+                        birth_date = datetime.fromisoformat(resource_data['birthDate'].replace('Z', '+00:00'))
+                        today = datetime.now()
+                        age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Check for risk factors
+            has_risk_factors = False
+            risk_factors_found = []
+            
+            if patient_data and isinstance(patient_data, dict):
+                # Check conditions in patient data
+                conditions = []
+                resource_data = None
+                if 'resource' in patient_data and isinstance(patient_data['resource'], dict):
+                    resource_data = patient_data['resource']
+                    if 'conditions' in resource_data:
+                        conditions = resource_data['conditions']
+                
+                # Look for risk factors in conditions
+                for condition in conditions:
+                    condition_name = condition.get('name', '').lower() if isinstance(condition, dict) else str(condition).lower()
+                    for risk_factor in guidelines['high_risk_factors']:
+                        if risk_factor.lower() in condition_name:
+                            has_risk_factors = True
+                            risk_factors_found.append(risk_factor)
+            
+            # Personalized recommendation based on age and risk factors
+            min_age = guidelines['min_age']
+            frequency = guidelines['frequency']
+            
+            if age is None:
+                # No age information available
+                return {
+                    "messages": [
+                        f"General guideline: {screening_type.title()} screening typically begins at age {min_age} for most people, {frequency}.",
+                        "I don't have your age information, so I can't provide a personalized recommendation.",
+                        "Please consult with your healthcare provider to determine if this screening is appropriate for you.",
+                        disclaimer
+                    ]
+                }
+            elif age < min_age and not has_risk_factors:
+                # Under recommended age with no risk factors
+                return {
+                    "messages": [
+                        f"Based on current guidelines, routine {screening_type} screening is recommended starting at age {min_age} for average-risk individuals.",
+                        f"Since you are {age} years old and have no documented high-risk factors, routine screening is not yet recommended.",
+                        "However, if you have a family history or other risk factors not in your medical record, discuss earlier screening with your doctor.",
+                        disclaimer
+                    ]
+                }
+            elif age < min_age and has_risk_factors:
+                # Under recommended age but has risk factors
+                return {
+                    "messages": [
+                        f"While routine {screening_type} screening typically starts at age {min_age}, you have risk factors that may warrant earlier screening.",
+                        f"Based on your medical record, you have: {', '.join(risk_factors_found)}",
+                        f"At age {age} with these risk factors, you should discuss with your doctor about getting screened now.",
+                        disclaimer
+                    ]
+                }
+            else:
+                # At or above recommended age
+                return {
+                    "messages": [
+                        f"Based on current guidelines, you should have a {screening_type} screening now.",
+                        f"At age {age}, routine {screening_type} screening is recommended {frequency}.",
+                        "You can schedule this procedure through your healthcare provider's office or patient portal.",
+                        disclaimer
+                    ]
+                }
+                
+        except Exception as e:
+            logger.error(f"Error generating screening recommendation: {str(e)}")
+            return {
+                "messages": [
+                    "I'm sorry, I couldn't generate a specific recommendation.",
+                    "Please consult with your healthcare provider about appropriate screening tests for you.",
+                    "This information is for educational purposes only and is not a substitute for professional medical advice."
+                ]
+            }
+            
     async def handle_symptom_query(self, message, patient_data=None, topic=None, additional_data=None, conversation_context=None):
         """
         Main method to handle symptom queries - providing personalized medical advice
@@ -1696,6 +1862,146 @@ IMPORTANT: End with a disclaimer about this being educational not professional m
             condition_name = f"{location}_pain"
             
         return {"messages": messages, "extracted_topic": condition_name}
+
+    async def get_screening_recommendation(self, patient_data=None, screening_type=None, user_age=None):
+        """
+        Provides personalized recommendations for medical screenings based on 
+        patient age, risk factors, and evidence-based guidelines.
+        
+        Args:
+            patient_data: Patient data dictionary (optional)
+            screening_type: Type of screening to provide recommendation for (e.g., "colonoscopy")
+            user_age: Patient's age if known (optional, will extract from patient data if not provided)
+            
+        Returns:
+            Dict with personalized recommendation messages
+        """
+        try:
+            # Include the standard medical disclaimer
+            disclaimer = "This information is for educational purposes only and is not a substitute for professional medical advice."
+            
+            # Default responses for unknown screenings
+            if not screening_type or screening_type.lower() not in self.screening_guidelines:
+                return {
+                    "messages": [
+                        "I don't have specific screening guidelines for that procedure.",
+                        "Please consult with your healthcare provider for personalized recommendations.",
+                        disclaimer
+                    ]
+                }
+            
+            # Normalize screening type
+            screening_type = screening_type.lower()
+            for key in self.screening_guidelines:
+                if key in screening_type or screening_type in key:
+                    screening_type = key
+                    break
+            
+            # Get guidelines for this screening type
+            guidelines = self.screening_guidelines.get(screening_type)
+            if not guidelines:
+                return {
+                    "messages": [
+                        f"I don't have specific guidelines for {screening_type}.",
+                        "Please consult with your healthcare provider for personalized recommendations.",
+                        disclaimer
+                    ]
+                }
+            
+            # Extract patient age if not provided
+            age = user_age
+            if not age and patient_data and isinstance(patient_data, dict):
+                # Check if patient_data is a wrapped resource
+                resource_data = None
+                if 'resource' in patient_data and isinstance(patient_data['resource'], dict):
+                    resource_data = patient_data['resource']
+                else:
+                    resource_data = patient_data
+                
+                if 'birthDate' in resource_data:
+                    from datetime import datetime
+                    try:
+                        birth_date = datetime.fromisoformat(resource_data['birthDate'].replace('Z', '+00:00'))
+                        today = datetime.now()
+                        age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Check for risk factors
+            has_risk_factors = False
+            risk_factors_found = []
+            
+            if patient_data and isinstance(patient_data, dict):
+                # Check conditions in patient data
+                conditions = []
+                resource_data = None
+                if 'resource' in patient_data and isinstance(patient_data['resource'], dict):
+                    resource_data = patient_data['resource']
+                    if 'conditions' in resource_data:
+                        conditions = resource_data['conditions']
+                
+                # Look for risk factors in conditions
+                for condition in conditions:
+                    condition_name = condition.get('name', '').lower() if isinstance(condition, dict) else str(condition).lower()
+                    for risk_factor in guidelines['high_risk_factors']:
+                        if risk_factor.lower() in condition_name:
+                            has_risk_factors = True
+                            risk_factors_found.append(risk_factor)
+            
+            # Personalized recommendation based on age and risk factors
+            min_age = guidelines['min_age']
+            frequency = guidelines['frequency']
+            
+            if age is None:
+                # No age information available
+                return {
+                    "messages": [
+                        f"General guideline: {screening_type.title()} screening typically begins at age {min_age} for most people, {frequency}.",
+                        "I don't have your age information, so I can't provide a personalized recommendation.",
+                        "Please consult with your healthcare provider to determine if this screening is appropriate for you.",
+                        disclaimer
+                    ]
+                }
+            elif age < min_age and not has_risk_factors:
+                # Under recommended age with no risk factors
+                return {
+                    "messages": [
+                        f"Based on current guidelines, routine {screening_type} screening is recommended starting at age {min_age} for average-risk individuals.",
+                        f"Since you are {age} years old and have no documented high-risk factors, routine screening is not yet recommended.",
+                        "However, if you have a family history or other risk factors not in your medical record, discuss earlier screening with your doctor.",
+                        disclaimer
+                    ]
+                }
+            elif age < min_age and has_risk_factors:
+                # Under recommended age but has risk factors
+                return {
+                    "messages": [
+                        f"While routine {screening_type} screening typically starts at age {min_age}, you have risk factors that may warrant earlier screening.",
+                        f"Based on your medical record, you have: {', '.join(risk_factors_found)}",
+                        f"At age {age} with these risk factors, you should discuss with your doctor about getting screened now.",
+                        disclaimer
+                    ]
+                }
+            else:
+                # At or above recommended age
+                return {
+                    "messages": [
+                        f"Based on current guidelines, you should have a {screening_type} screening now.",
+                        f"At age {age}, routine {screening_type} screening is recommended {frequency}.",
+                        "You can schedule this procedure through your healthcare provider's office or patient portal.",
+                        disclaimer
+                    ]
+                }
+                
+        except Exception as e:
+            logger.error(f"Error generating screening recommendation: {str(e)}")
+            return {
+                "messages": [
+                    "I'm sorry, I couldn't generate a specific recommendation.",
+                    "Please consult with your healthcare provider about appropriate screening tests for you.",
+                    "This information is for educational purposes only and is not a substitute for professional medical advice."
+                ]
+            }
 
     async def handle_issue_report(self, issue_data: Dict[str, Any], openai_client: AsyncGPT4Client) -> Dict[str, Any]:
         """Handle issue report and generate appropriate response."""

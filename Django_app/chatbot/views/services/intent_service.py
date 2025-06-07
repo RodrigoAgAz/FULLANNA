@@ -52,10 +52,10 @@ def get_async_fhir_client():
         raise
 
 # ============================================
-#   OpenAI Client Initialization
+#   Service Initialization
 # ============================================
 
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+from ...utils.openai_manager import openai_manager
 language_service = LanguageService()
 
 # ============================================
@@ -478,6 +478,19 @@ async def detect_intent(
                 "entities": {"action": "followup", "topic": current_topic.get('name'),
                              "original_text": user_input, "context_type": "anaphora_resolution"}
             }
+        elif topic_type == 'explanation':
+            logger.info(f"Anaphora resolution: Educational explanation context detected for topic: {current_topic.get('name')}")
+            logger.debug(f"Identified as explanation follow-up for {current_topic.get('name')}")
+            return {
+                "intent": Intent.EXPLANATION_QUERY.value,
+                "confidence": 0.95,
+                "entities": {
+                    "action": "followup", 
+                    "topic": current_topic.get('name'),
+                    "original_text": user_input, 
+                    "context_type": "anaphora_resolution"
+                }
+            }
         else:
             # General follow-up for other topics
             logger.info(f"Anaphora resolution: General follow-up to topic {topic_type}")
@@ -527,6 +540,13 @@ async def detect_intent(
                         "entities": {"action": "followup", "topic": topic_name, "original_text": user_input, 
                                     "context_type": "short_query"}
                     }
+                elif topic_type in ['explanation', 'screening', 'prevention']:
+                    return {
+                        "intent": Intent.EXPLANATION_QUERY.value,
+                        "confidence": 0.95,
+                        "entities": {"action": "followup", "topic": topic_name, "original_text": user_input, 
+                                    "context_type": "short_query"}
+                    }
         
         context_prompt = f"\nPrevious topic: {conversation_context['current_topic'].get('name')}" if conversation_context and conversation_context.get('current_topic') else ""
         cache_key = f"short_query::{original_message}{context_prompt}"
@@ -534,7 +554,7 @@ async def detect_intent(
             logger.info("Using cached GPT fallback for short query.")
             return FALLBACK_CACHE[cache_key]
         try:
-            response = await client.chat.completions.create(
+            response = await openai_manager.chat_completion(
                 model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": (
@@ -543,9 +563,12 @@ async def detect_intent(
                         "{\n"
                         '  "is_followup": boolean,\n'
                         '  "confidence": float,\n'
-                        '  "related_intent": "lab_results_query" or "show_appointments" or ...,\n'
+                        '  "related_intent": "lab_results_query" or "show_appointments" or "explanation_query" or ...,\n'
                         '  "reasoning": "string"\n'
                         "}"
+                        "\n\nIMPORTANT: If the previous topic is about a medical procedure, screening, or health information, "
+                        "use 'explanation_query' as the related_intent. Examples of explanation topics include colonoscopy, "
+                        "mammogram, blood pressure, or any medical test or procedure."
                     )},
                     {"role": "user", "content": f"Message: {user_input}{context_prompt}"}
                 ],
@@ -571,6 +594,21 @@ async def detect_intent(
                         "intent": Intent.SHOW_APPOINTMENTS.value,
                         "confidence": analysis['confidence'],
                         "entities": {"action": "view", "original_text": user_input}
+                    }
+                    FALLBACK_CACHE[cache_key] = result
+                    return result
+                elif related_intent == 'explanation_query':
+                    # Handle follow-up questions about medical explanation topics
+                    topic_name = conversation_context.get('current_topic', {}).get('name', 'unknown')
+                    result = {
+                        "intent": Intent.EXPLANATION_QUERY.value,
+                        "confidence": analysis['confidence'],
+                        "entities": {
+                            "action": "followup",
+                            "topic": topic_name,
+                            "original_text": user_input,
+                            "context_type": "semantic_analysis"
+                        }
                     }
                     FALLBACK_CACHE[cache_key] = result
                     return result
@@ -773,7 +811,7 @@ Return strict JSON:
         return FALLBACK_CACHE[cache_key]
 
     try:
-        response = await client.chat.completions.create(
+        response = await openai_manager.chat_completion(
             model=OPENAI_MODEL,
             messages=gpt_messages,
             temperature=0.2,
@@ -855,7 +893,7 @@ async def analyze_symptom_and_conditions_with_ai(
             }
         }
 
-        response = await client.chat.completions.create(
+        response = await openai_manager.chat_completion(
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": (

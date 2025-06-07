@@ -769,7 +769,8 @@ DATABASES = {
 
 
 # Redis configuration
-REDIS_URL = os.getenv('REDIS_URL', 'redis://redis:6379/0')
+# Use localhost for local development, 'redis' service name for Docker/containerized environments
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 # Parse REDIS_URL for backwards compatibility
 REDIS_HOST = os.getenv('REDIS_HOST', REDIS_URL.split('@')[-1].split(':')[0] if '@' in REDIS_URL else REDIS_URL.split('//')[1].split(':')[0])
 REDIS_PORT = int(os.getenv('REDIS_PORT', REDIS_URL.split(':')[-1].split('/')[0]))
@@ -1142,7 +1143,7 @@ class TwilioSignatureMiddleware:
         self.token = settings.TWILIO_AUTH_TOKEN
 
     def __call__(self, request):
-        if request.path.startswith("/chatbot/"):
+        if request.path == "/webhooks/sms/":
             tw_sig = request.headers.get("X-Twilio-Signature")
             if not self._valid(request, tw_sig):
                 return HttpResponseForbidden("Invalid Twilio signature")
@@ -9613,14 +9614,23 @@ IMPORTANT: End with a disclaimer about this being educational not professional m
                     # Create a new client as fallback
                     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
                 
-                response = await client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
+                # Debug log for message processing
+                print("USER TEXT:", message)
+                
+                # Create the GPT payload
+                gpt_payload = {
+                    "model": "gpt-4o-mini",
+                    "messages": [
                         {"role": "system", "content": "You are a helpful medical advisor providing accurate, concise advice."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.3  # Lower temperature for more factual responses
-                )
+                    "temperature": 0.3  # Lower temperature for more factual responses
+                }
+                
+                # Debug log for the GPT payload
+                print("GPT INPUT:", gpt_payload)
+                
+                response = await client.chat.completions.create(**gpt_payload)
                 
                 advice = response.choices[0].message.content.strip()
                 
@@ -10017,9 +10027,13 @@ IMPORTANT: End with a disclaimer about this being educational not professional m
         Uses GPT for high-quality entity extraction.
         """
         try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
+            # Debug log for symptom extraction
+            print("USER TEXT:", symptom_description)
+            
+            # Create the GPT payload
+            gpt_payload = {
+                "model": "gpt-4o-mini",
+                "messages": [
                     {"role": "system", "content": """You are a medical NLP expert that extracts key medical terms.
                     Extract the main health issue/symptom from the user's message as a simple noun phrase.
                     Return a JSON object with the following structure:
@@ -10033,9 +10047,14 @@ IMPORTANT: End with a disclaimer about this being educational not professional m
                     
                     Return only the JSON object with the keyphrase and normalized term."""}
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.1
-            )
+                "response_format": {"type": "json_object"},
+                "temperature": 0.1
+            }
+            
+            # Debug log for the GPT payload
+            print("GPT INPUT:", gpt_payload)
+            
+            response = await self.openai_client.chat.completions.create(**gpt_payload)
             
             # Parse the response
             result = json.loads(response.choices[0].message.content)
@@ -15381,6 +15400,8 @@ File: Django_app/.env
 SECRET_KEY=8c4(4agto%gi&k)e9h7cf*8e3h!_%d!hj*yxs3fp-h+llshr@&
 OPENAI_API_KEY=sk-ZUwuXVlTh4hG6P-1nHRBSXyivgYyJVkRDIhVwc-RYJT3BlbkFJ22hOphcF46v8xUMASYVm7THxlHkVkAPXUSAQTtO5AA
 FHIR_SERVER_URL=http://localhost:8080/fhir
+REDIS_URL=redis://localhost:6379/0
+# Legacy Redis config (used as fallback)
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=0
@@ -15500,6 +15521,8 @@ services:
     volumes:
       - ./:/app
     environment:
+      - REDIS_URL=redis://redis:6379/0
+      # Legacy Redis config (used as fallback)
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -15517,7 +15540,7 @@ services:
       - hapi-fhir
     command: >
       sh -c "python manage.py migrate && 
-             uvicorn anna_project.asgi:application --host 0.0.0.0 --port 8000 --reload"
+             gunicorn anna_project.asgi:application -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 2"
 
   hapi-fhir:
     image: hapiproject/hapi:latest
@@ -15549,6 +15572,8 @@ services:
     volumes:
       - ./:/app
     environment:
+      - REDIS_URL=redis://redis:6379/0
+      # Legacy Redis config (used as fallback)
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -15570,6 +15595,8 @@ services:
     volumes:
       - ./:/app
     environment:
+      - REDIS_URL=redis://redis:6379/0
+      # Legacy Redis config (used as fallback)
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0

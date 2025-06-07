@@ -167,14 +167,15 @@ def classify_topic(message: str) -> str:
     """
     Classify the topic of the message using a zero-shot classification pipeline.
     """
-    candidate_labels = ["scheduling", "medication", "symptoms", "general"]
+    # Expanded candidate labels to include explanation, screening, and prevention
+    candidate_labels = ["scheduling", "medication", "symptoms", "explanation", "screening", "prevention", "general"]
     try:
         result = topic_classifier(message, candidate_labels)
         topic = result["labels"][0]
         return topic
     except Exception as e:
         logger.error(f"Error classifying topic: {str(e)}", exc_info=True)
-        # Fallback to keyword matching
+        # Fallback to keyword matching with expanded options
         message_lower = message.lower()
         if "appointment" in message_lower or "schedule" in message_lower:
             return "scheduling"
@@ -182,6 +183,12 @@ def classify_topic(message: str) -> str:
             return "medication"
         elif "symptom" in message_lower or "pain" in message_lower:
             return "symptoms"
+        elif any(word in message_lower for word in ["explanation", "explain", "what is", "why do i need", "tell me about"]):
+            return "explanation"
+        elif any(word in message_lower for word in ["screening", "test", "should i get", "colonoscopy", "mammogram"]):
+            return "screening"
+        elif any(word in message_lower for word in ["prevent", "avoid", "reduce risk", "how to stop"]):
+            return "prevention"
         else:
             return "general"
 
@@ -279,6 +286,13 @@ class ContextManager:
         """
         if topic_data is None:
             topic_data = {}
+        
+        # Don't overwrite a specific topic with a generic one
+        generic = {"general", "explanation", "followup", "unknown", ""}
+        current = self.session.get("current_topic", {}).get("name", "")
+        if topic_name in generic and current and current not in generic:
+            logger.debug(f"Skipping generic topic '{topic_name}', keeping '{current}'")
+            return
             
         # Map topic from classifier to intent service's expected topic types
         topic_type_mapping = {
@@ -286,6 +300,9 @@ class ContextManager:
             "medication": "medication",
             "symptoms": "symptom_report",
             "general": "general",
+            "explanation": "explanation",  # Map explanation topic to explanation type
+            "screening": "explanation",    # Map screening topics to explanation type for now
+            "prevention": "explanation",   # Prevention is also educational in nature
             # Add explicit mappings for symptom categories
             "back_pain": "symptom_report",
             "headache": "symptom_report", 

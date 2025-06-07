@@ -348,6 +348,59 @@ CHOLESTEROL_INFO = {
     ]
 }
 
+# COLONOSCOPY INFORMATION TEMPLATE
+COLONOSCOPY_INFO = {
+    "brief_answer": "A colonoscopy is a procedure that lets doctors examine the inner lining of your large intestine (colon and rectum) using a flexible tube with a camera. It's primarily used to screen for colorectal cancer and find or remove polyps before they become cancerous.",
+    
+    "detailed_info": {
+        "WHAT IS A COLONOSCOPY": [
+            "An examination procedure using a colonoscope (long, flexible tube with a camera and light source)",
+            "Allows doctors to view the entire colon and rectum",
+            "Usually lasts 30-60 minutes",
+            "Performed under mild sedation so patients are comfortable"
+        ],
+        
+        "WHY IT IS DONE": [
+            "Screens for colorectal cancer (the third most common cancer)",
+            "Detects and removes precancerous polyps before they become malignant",
+            "Investigates unexplained changes in bowel habits or abdominal symptoms",
+            "Evaluates inflammatory bowel disease, bleeding, or other abnormalities",
+            "Follow-up examination after previous findings"
+        ],
+        
+        "WHAT TO EXPECT": [
+            "Bowel prep required the day before (clear liquids and laxative solution)",
+            "You'll receive sedation through an IV before the procedure",
+            "The doctor gently inserts the colonoscope through the rectum",
+            "Air or carbon dioxide inflates the colon for better viewing",
+            "If polyps are found, they can typically be removed during the procedure",
+            "Recovery usually takes about 1-2 hours after the procedure",
+            "You'll need someone to drive you home due to the sedation"
+        ],
+        
+        "WHEN IS IT RECOMMENDED": [
+            "Average-risk adults should begin screening at age 45",
+            "If you have a family history of colorectal cancer, screenings may start earlier",
+            "Typically repeated every 10 years if normal and you have average risk",
+            "More frequent follow-ups if polyps are found or you have other risk factors"
+        ]
+    },
+    
+    "when_to_see_doctor": [
+        "Follow your doctor's recommendations for screening based on your risk factors",
+        "If you experience unexplained abdominal pain, blood in stool, or changes in bowel habits",
+        "If you have a family history of colorectal cancer or polyps"
+    ],
+    
+    "practical_steps": [
+        "Follow bowel prep instructions exactly - clean colon is essential for effective screening",
+        "Arrange for someone to drive you home after the procedure",
+        "Take the day off work on the day of the procedure",
+        "Discuss any medications you're taking with your doctor before the procedure",
+        "After the procedure, you may experience some bloating or gas pain, which is normal"
+    ]
+}
+
 # Add more templates as needed...
 
 # Dictionary of templates by topic for easy lookup
@@ -359,6 +412,7 @@ MEDICAL_INFO_TEMPLATES = {
     "chest pain": CHEST_PAIN_INFO,
     "sprained ankle": SPRAINED_ANKLE_INFO,
     "cholesterol": CHOLESTEROL_INFO,
+    "colonoscopy": COLONOSCOPY_INFO,
 }
 
 def get_template_for_topic(topic: str):

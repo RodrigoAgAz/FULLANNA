@@ -153,7 +153,8 @@ def format_medical_info_response(
     topic: str,
     summary: str,
     details: Dict[str, Any],
-    normal_values: Optional[Dict[str, Any]] = None
+    normal_values: Optional[Dict[str, Any]] = None,
+    include_disclaimer: bool = True
 ) -> List[str]:
     """
     Format a response for medical information queries with clear categories.
@@ -163,6 +164,7 @@ def format_medical_info_response(
         summary: Brief summary of the topic
         details: Dictionary with detailed information categories
         normal_values: Optional dictionary with normal/abnormal range information
+        include_disclaimer: Whether to include the standard medical disclaimer (default True)
         
     Returns:
         List of formatted message strings
@@ -193,8 +195,9 @@ def format_medical_info_response(
             if "abnormal" in value_info:
                 messages.append(f"  - {value_info['abnormal']}")
     
-    # Always include medical disclaimer
-    messages.append(f"\n{STANDARD_DISCLAIMER}")
+    # Add disclaimer only when requested (default = True)
+    if include_disclaimer:
+        messages.append(f"\n{STANDARD_DISCLAIMER}")
     
     return messages
 

@@ -4,7 +4,7 @@ import json
 from langdetect import detect, DetectorFactory
 from django.conf import settings
 from django.core.cache import cache  # Redis cache backend
-from openai import AsyncOpenAI  # Changed to AsyncOpenAI
+from ...utils.openai_manager import openai_manager
 import re
 from ..utils.constants import OPENAI_MODEL
 import hashlib
@@ -19,12 +19,12 @@ class LanguageService:
             'en': {'name': 'English', 'code': 'en'},
             'es': {'name': 'Spanish', 'code': 'es'}
         }
-        self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)  # Changed to AsyncOpenAI
+        # Use centralized OpenAI manager
     
     async def detect_language(self, text):
         """Detect the language of the input text"""
         try:
-            response = await self.openai_client.chat.completions.create(
+            response = await openai_manager.chat_completion(
                 model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": "You are a language detector. Return JSON with language and translation if not English."},
@@ -78,7 +78,7 @@ class LanguageService:
         try:
             # No cache hit, call the OpenAI API
             logger.info(f"Translation cache miss - calling API for {target_lang} text (key: {cache_key[:10]}...)")
-            response = await self.openai_client.chat.completions.create(
+            response = await openai_manager.chat_completion(
                 model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": f"You are a translator. Translate the following text to {self.supported_languages[target_lang]['name']}, maintaining the same tone and meaning:"},
@@ -111,7 +111,7 @@ class LanguageService:
         Used by the cached translate_text method
         """
         try:
-            response = await self.openai_client.chat.completions.create(
+            response = await openai_manager.chat_completion(
                 model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": f"You are a translator. Translate the following text to {self.supported_languages[target_lang]['name']}, maintaining the same tone and meaning:"},

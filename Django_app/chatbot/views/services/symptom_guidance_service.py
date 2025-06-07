@@ -5,17 +5,15 @@ from django.conf import settings
 import json
 from ..utils.formatters import format_message
 from .fhir_service import FHIRService
-import openai
 from datetime import datetime
 from asgiref.sync import sync_to_async
-from openai import AsyncOpenAI
+from ...utils.openai_manager import openai_manager
 from ..utils.constants import OPENAI_MODEL
 
 logger = logging.getLogger('chatbot')
 class SymptomGuidanceService:
     def __init__(self):
         self.fhir_service = FHIRService()
-        self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         
         # Define red flag symptoms
         self.RED_FLAGS = {
@@ -97,7 +95,7 @@ class SymptomGuidanceService:
         try:
             prompt = await sync_to_async(self._build_analysis_prompt)(symptom_description, patient_data)
             
-            response = await self.openai_client.chat.completions.create(
+            response = await openai_manager.chat_completion(
                 model=OPENAI_MODEL,
                 messages=[
                     {"role": "system", "content": "You are a medical triage assistant. Always err on the side of caution."},
